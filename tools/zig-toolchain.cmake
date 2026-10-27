@@ -26,3 +26,6 @@ endforeach()
 set(CMAKE_C_COMPILER "${_wrapper_dir}/zig-cc")
 set(CMAKE_AR "${_wrapper_dir}/zig-ar" CACHE FILEPATH "" FORCE)
 set(CMAKE_RANLIB "${_wrapper_dir}/zig-ranlib" CACHE FILEPATH "" FORCE)
+# CMake 3.27+ passes --dependency-file to the linker with Ninja; zig's linker
+# segfaults on it on a macOS host, so let CMake track link dependencies itself.
+set(CMAKE_LINK_DEPENDS_USE_LINKER OFF)

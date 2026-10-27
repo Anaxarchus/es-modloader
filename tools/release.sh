@@ -123,6 +123,9 @@ case $rc in
 esac
 
 # ---- build -------------------------------------------------------------------
+# Host compiler flags (e.g. Homebrew LLVM's LDFLAGS/CPPFLAGS) are for this machine,
+# not for the cross targets, so keep them out of every build.
+unset CFLAGS CPPFLAGS CXXFLAGS LDFLAGS
 # name -> zig target, toolchain file, library, arch, min OS check
 target_info() {
 	case $1 in
