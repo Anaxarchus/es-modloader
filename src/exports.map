@@ -1,0 +1,5 @@
+/* The one symbol the loader exports (Linux and other ELF targets). */
+{
+	global: es_loader_init;
+	local: *;
+};

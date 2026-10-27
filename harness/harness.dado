@@ -1,0 +1,126 @@
+package esmod
+
+import sdk "../sdk/es"
+
+// Runs one mod. Every mod has an engine (a VM) of its own, and in it one
+// Harness, made by entry.dado; the loader's C side (src/loader.c) reaches it
+// through entry.dado's exports and decides which hook runs when.
+//
+// A mod is a class extending `es.Mod` (sdk/es/Mod.dados), built as one
+// JavaScript file, or plain JavaScript extending the global `Mod` that
+// `prepare` defines before the mod loads (probe.js). It is refused unless it
+// reports a mod API version this loader speaks. A hook that fails is reported
+// here, and the C side switches it off (on_step, on_day, on_enter,
+// can_outfitter) or leaves it on (the hooks a player's click runs).
+//
+// The C side brackets every call into a mod's hook with the game's
+// hook_timing, and runs it under the watchdog; this class does neither, so a
+// mod that the watchdog stops cannot leave a bracket open.
+private class Harness:
+    foreign "probe.js":
+        bool has_method(any o, string name)
+        void install_globals(int api)
+
+    // core:script's code for a stopped script, and the text of the Error a
+    // stop raises in it.
+    private int STOPPED = -2147483647
+    private string STOP_TEXT = "the host stopped this script"
+
+    Game game = Game()
+    any obj = 0
+    string name = ""
+
+    // Define the globals a plain JavaScript mod builds on, then load the mod
+    // whose JavaScript is `<path>.js`, naming it `n` in messages. Answers the
+    // hooks it has (`hooks`, 0 or more) when it loaded and speaks a mod API
+    // this loader runs, or -1. Everything here may run the mod's code (its
+    // module's top level, api_version, getters and Proxy traps behind
+    // has_method), so the C side runs it all as one armed, bracketed call.
+    int prepare(string path, string n):
+        name = n
+        install_globals(sdk.MOD_API)
+        try any o = Script.load(path) else e:
+            // Stopped by the watchdog: the loader says so.
+            if e.code == STOPPED || e.message.ends_with(STOP_TEXT):
+                return -1
+            game.log("dado: mod \"" + name + "\" did not load: " + e.message)
+            return -1
+        if !has_method(o, "api_version"):
+            game.log("dado: mod \"" + name + "\" was refused: it does not extend es.Mod (or the global Mod)")
+            return -1
+        try any version = o.api_version() else e:
+            if e.code == STOPPED || e.message.ends_with(STOP_TEXT):
+                return -1
+            game.log("dado: mod \"" + name + "\" was refused: " + e.message)
+            return -1
+        // The API only grows, so a mod built for this version or an earlier one runs.
+        if int(version) < 1 || int(version) > sdk.MOD_API:
+            game.log("dado: mod \"" + name + "\" was refused: it was built for mod API " + string(int(version)) + " and this loader speaks up to " + string(sdk.MOD_API))
+            return -1
+        obj = o
+        return hooks()
+
+    // Which hooks the mod has, one bit each in the order of HOOK_NAMES
+    // (src/loader.c): on_load is bit 0, on_step bit 1, ...
+    int hooks():
+        int bits = 0
+        int bit = 1
+        for i in 0..<12:
+            if has_method(obj, hook_name(i)):
+                bits = bits + bit
+            bit = bit * 2
+        return bits
+
+    // Run hook number `hook` (the bit numbers of `hooks`) with its arguments:
+    // `s` the system or outfit, `a` and `b` the numbers. Answers what
+    // can_outfitter answered (1 or 0), 0 for the other hooks, and -1 when the
+    // hook failed, which it reports.
+    int call(int hook, string s, int a, int b):
+        try int answer = run(hook, s, a, b) else e:
+            // Stopped by the watchdog (core:script's STOPPED): the loader says so.
+            if e.code == STOPPED || e.message.ends_with(STOP_TEXT):
+                return -2
+            string what = hook_name(hook)
+            if hook == 1 || hook == 2 || hook == 3 || hook == 6:
+                game.log("dado: mod \"" + name + "\" failed in " + what + " and its " + what + " is now off: " + e.message)
+            else if hook == 0:
+                game.log("dado: mod \"" + name + "\" failed in on_load and was not loaded: " + e.message)
+            else:
+                game.log("dado: mod \"" + name + "\" failed in " + what + ": " + e.message)
+            return -1
+        return answer
+
+    int run(int hook, string s, int a, int b):
+        if hook == 0:
+            obj.on_load(game)
+        else if hook == 1:
+            obj.on_step(game, a)
+        else if hook == 2:
+            obj.on_day(game, a)
+        else if hook == 3:
+            obj.on_enter(game, s)
+        else if hook == 4:
+            obj.on_planet_button(game)
+        else if hook == 5:
+            obj.on_panel(game, a)
+        else if hook == 6:
+            any answer = obj.can_outfitter(game, s)
+            bool active = answer
+            return 1 if active else 0
+        else if hook == 7:
+            obj.on_outfitter(game, s)
+        else if hook == 8:
+            obj.on_confirm(game, a)
+        else if hook == 9:
+            obj.on_panel_row(game, a)
+        else if hook == 10:
+            obj.on_panel_header(game, a)
+        else if hook == 11:
+            obj.on_number(game, a, b)
+        return 0
+
+    string hook_name(int hook):
+        []string names = ["on_load", "on_step", "on_day", "on_enter", "on_planet_button", "on_panel", "can_outfitter", "on_outfitter", "on_confirm", "on_panel_row", "on_panel_header", "on_number"]
+        if hook < 0 || hook >= names.len():
+            return "hook " + string(hook)
+        return names[hook]

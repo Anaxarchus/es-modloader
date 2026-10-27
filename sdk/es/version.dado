@@ -1,0 +1,28 @@
+// The version of the mod API. It only grows: each version adds to `Game` and
+// `Mod` and removes nothing, so a game runs mods built for its version or an
+// earlier one, and refuses newer ones. The harness reads this same constant.
+//   1: Game's ships, conditions and messages; on_load and on_step.
+//   2: the galaxy, world changes, governments, spawning, map overlays, the
+//      planet button and panels; on_day, on_enter, on_planet_button, on_panel.
+//   3: Game.fleet_stat (a fleet's hull, shields, dps, speed, ships and cost),
+//      system_fleet_count and system_fleet.
+//   4: Game.map_detail, a section of the map's side panel for a system.
+//   5: the outfitter button (Game.outfitter_button; can_outfitter, on_outfitter),
+//      the player's fleet by UUID, outfits and integrating them
+//      (Game.ship_integrate), and Game.confirm with on_confirm.
+//   6: per-pilot mod storage (Game.data, set_data), planets (planet,
+//      planet_at, planet_service, ...), tables in the panel (panel_columns,
+//      panel_row; on_panel_row), and Game.ask_number with on_number.
+//   7: a full screen for the panel (Game.screen_open), a chosen row
+//      (panel_select), and clicks on its column headings (on_panel_header).
+//   8: charts on the screen's sidebar (Game.panel_chart), and jobs on the job
+//      board (Game.offer_job).
+//   9: shipyard stock (Game.ship_stock_on, ship_stock, set_ship_stock,
+//      ship_order_note, ship_in_stock), shipyard listings and ship models
+//      (shipyard_count, shipyard_model, model_name, model_cost,
+//      model_category, model_licenses), buy_ship, the ships destroyed each
+//      step (losses, loss_model, loss_government, loss_by_player), and
+//      map_label and map_ring.
+package es
+
+const i64 MOD_API = 9

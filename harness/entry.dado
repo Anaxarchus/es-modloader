@@ -1,0 +1,89 @@
+// The harness's C surface: what the loader's C side (src/loader.c) calls.
+// `dadoc --emit=h` writes esmod.h from these.
+//
+// Every mod runs in an engine (a VM) of its own, holding one Harness, in a
+// slot of the tables below. All of this runs on the thread that made the
+// engines, the game's main thread, except esmod_interrupt, which the
+// watchdog thread calls while the main thread is inside esmod_call.
+package esmod
+
+import "core:script"
+
+// The most mods one loader runs.
+private const i32 MAX_MODS = 1024
+
+private [1024]VM vms
+private [1024]Harness harnesses
+private [1024]bool used
+// Slots in use or used before: slots are not reused.
+private i32 slots = 0
+
+// Start the harness. Answers 0. (Each mod's engine is made by esmod_new.)
+export i32 esmod_init():
+    return 0
+
+// A new slot: an engine with a Harness in it, holding no mod yet. Answers
+// the slot, or -1 when no engine could be made.
+export i32 esmod_new():
+    if slots >= MAX_MODS:
+        return -1
+    VM vm
+    try vm = #script_vm(on_error: script.CONTINUE) else:
+        return -1
+    Harness h
+    try h = #script_new(vm, Harness) else:
+        #delete(vm)
+        return -1
+    i32 slot = slots
+    vms[slot] = vm
+    harnesses[slot] = h
+    used[slot] = true
+    slots += 1
+    return slot
+
+private bool live(i32 slot):
+    return slot >= 0 && slot < slots && used[slot]
+
+// Load the mod at `<path>.js` into a new slot's engine, naming it `name` in
+// messages. Answers the hooks it has (Harness.hooks: one bit each, 0 or more)
+// when it loaded, -1 when it was refused or failed, -2 when it was stopped
+// (the watchdog).
+export i32 esmod_prepare(i32 slot, cstring path, cstring name):
+    if !live(slot):
+        return -1
+    try i64 r = harnesses[slot].prepare(string8(path), string8(name)) else code:
+        return -2 if code == script.STOPPED else -1
+    if r < 0:
+        return -1
+    return i32(r)
+
+// Run hook `hook` of the slot's mod (Harness.call): its answer, -1 when the
+// hook failed, or -2 when the watchdog stopped it.
+export i32 esmod_call(i32 slot, i32 hook, cstring text, i32 a, i32 b):
+    if !live(slot):
+        return -1
+    try i64 r = harnesses[slot].call(hook, string8(text), a, b) else code:
+        return -2 if code == script.STOPPED else -1
+    return i32(r)
+
+// The watchdog: stop the script running in the slot's engine, giving it
+// `grace` milliseconds to leave by itself before it is forced. Called from
+// the watchdog thread while the main thread is inside esmod_call or
+// esmod_prepare for this slot; the engine ends, and the call answers -2.
+export void esmod_interrupt(i32 slot, i32 grace):
+    if slot >= 0 && slot < slots && used[slot]:
+        #script_stop(vms[slot], grace)
+
+// Let go of a slot's mod and its engine.
+export void esmod_drop(i32 slot):
+    if !live(slot):
+        return
+    used[slot] = false
+    #delete(harnesses[slot])
+    #delete(vms[slot])
+
+// End every mod.
+export void esmod_shutdown():
+    for i in 0..<slots:
+        esmod_drop(i)
+    slots = 0

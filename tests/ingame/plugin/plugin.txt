@@ -1,0 +1,3 @@
+name "Dado mod tests"
+about "The Dado loader's in-game test: test mods in scripts/, and the test in data/tests. Installed by tests/ingame/run.sh."
+version "1"

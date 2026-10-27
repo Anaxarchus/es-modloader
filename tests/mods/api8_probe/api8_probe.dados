@@ -1,0 +1,24 @@
+class Api8Probe extends es.Mod
+
+// A test mod for mod API 8: a chart on the screen, and a job on the job
+// board. It records what it saw in conditions named "test: api8 ...", which
+// tests/fake_host.cpp checks, and does nothing unless "test: api8" is set.
+
+import "imports:sdk/es"
+
+string name():
+    return "api8 probe"
+
+void on_enter(es.Game game, string system):
+    if game.condition("test: api8") == 0:
+        return
+    string job = "name \"Parts for Acme\"\ndescription \"Deliver <cargo> to <destination>.\"\ncargo \"Ship Parts\" 12\ndestination \"Alpha Station\"\ndeadline 20\non complete\n\tpayment 50000\n\t\"api8 probe: delivered 1\" = 1"
+    game.set_condition("test: api8 offered", 1 if game.offer_job("parts 1", job) else 0)
+    game.set_condition("test: api8 offered twice", 1 if game.offer_job("parts 1", job) else 0)
+
+void on_planet_button(es.Game game):
+    if game.condition("test: api8") == 0:
+        return
+    game.screen_open("Chart", "")
+    game.panel_chart("Price", "10,12.5,11,14")
+    game.panel_chart("Index", "100,101")

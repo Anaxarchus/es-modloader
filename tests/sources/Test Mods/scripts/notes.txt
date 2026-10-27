@@ -1,0 +1,1 @@
+Not a mod: only <name>.js files in scripts/ are.

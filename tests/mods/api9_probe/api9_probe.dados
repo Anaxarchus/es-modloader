@@ -1,0 +1,70 @@
+class Api9Probe extends es.Mod
+
+// A test mod for mod API 9: shipyard stock, shipyard listings, ship models,
+// buy_ship, the losses feed and map labels. It records what it saw in
+// conditions named "test: api9 ...", which tests/fake_host.cpp checks, and does
+// nothing unless "test: api9" is set.
+
+import "imports:sdk/es"
+
+string name():
+    return "api9 probe"
+
+void on_enter(es.Game game, string system):
+    if game.condition("test: api9") == 0 || game.planet() == "":
+        return
+    game.ship_stock_on(true)
+    string planet = game.planet()
+    int n = game.shipyard_count(planet)
+    string list = ""
+    for k in 0 ..< n:
+        if k > 0:
+            list = list + ","
+        list = list + game.shipyard_model(planet, k)
+    game.set_condition("test: api9 shipyard " + string(n) + " " + list, 1)
+    bool bad = game.shipyard_count("Nowhere") == 0 && game.shipyard_model(planet, n) == "" && game.shipyard_model(planet, -1) == ""
+    game.set_condition("test: api9 shipyard bad", 1 if bad else 0)
+    game.set_condition("test: api9 model " + game.model_name("Frigate") + "|" + game.model_category("Frigate") + "|" + game.model_licenses("Frigate"), 1)
+    game.set_condition("test: api9 cost Frigate", game.model_cost("Frigate"))
+    bool unknown = game.model_name("Nope") == "" && game.model_cost("Nope") == 0 && game.model_category("Nope") == "" && game.model_licenses("Nope") == ""
+    game.set_condition("test: api9 model bad", 1 if unknown else 0)
+    game.set_ship_stock(planet, "Bounder", 3)
+    game.set_condition("test: api9 stock set", game.ship_stock(planet, "Bounder"))
+    game.set_ship_stock(planet, "Bounder", -1)
+    game.set_condition("test: api9 stock untracked", game.ship_stock(planet, "Bounder"))
+    game.set_ship_stock("Nowhere", "Bounder", 5)
+    game.set_ship_stock(planet, "Nope", 5)
+    game.set_condition("test: api9 stock unknown", game.ship_stock("Nowhere", "Bounder"))
+    game.set_ship_stock(planet, "Star Barge", 2)
+    game.ship_order_note(planet, "Frigate", "Order one at Alpha Station.")
+    game.ship_order_note("Nowhere", "Frigate", "Nope.")
+    game.set_condition("test: api9 buy in enter", 1 if game.buy_ship("Bounder", "Sneaky") else 0)
+    game.map_label("Delta", "Kestrel Refits", 1.0, 0.8, 0.2)
+    game.map_label("Nowhere", "Lost", 1.0, 1.0, 1.0)
+    game.map_label("Delta", "", 1.0, 1.0, 1.0)
+    game.map_ring("Delta", 1.5, 1.0, 0.8, 0.2)
+    game.map_ring("Delta", 10.0, 1.0, 0.8, 0.2)
+    game.map_ring("Nowhere", 1.5, 1.0, 0.8, 0.2)
+    game.set_condition("test: api9 in stock barge", game.ship_in_stock("Star Barge"))
+    game.set_condition("test: api9 in stock unknown", game.ship_in_stock("Nope"))
+
+void on_planet_button(es.Game game):
+    if game.condition("test: api9") == 0:
+        return
+    game.set_condition("test: api9 buy bounder", 1 if game.buy_ship("Bounder", "Ace") else 0)
+    game.set_condition("test: api9 buy frigate unlicensed", 1 if game.buy_ship("Frigate", "") else 0)
+    game.set_condition("license: Navy", 1)
+    game.set_condition("license: Militia", 1)
+    game.set_condition("test: api9 buy frigate broke", 1 if game.buy_ship("Frigate", "") else 0)
+    game.set_condition("test: api9 buy unknown", 1 if game.buy_ship("Nope", "") else 0)
+    game.set_condition("test: api9 buy barge", 1 if game.buy_ship("Star Barge", "") else 0)
+
+void on_step(es.Game game, int step):
+    if game.condition("test: api9") == 0:
+        return
+    int n = game.losses()
+    for k in 0 ..< n:
+        string by = "1" if game.loss_by_player(k) else "0"
+        game.set_condition("test: api9 loss " + game.loss_model(k) + "|" + game.loss_government(k) + "|" + by, 1)
+    game.set_condition("test: api9 losses", game.condition("test: api9 losses") + n)
+    game.set_condition("test: api9 in stock flying", 1 if game.ship_in_stock("Star Barge") == 0 else 0)
