@@ -191,6 +191,17 @@ if [ "$UNI" = 1 ]; then
 		$REL "$RELPY" lipo "$U/libesdado.dylib" "$X" "$A"
 		HOW="tools/release.py lipo"
 	fi
+	# zig signs only the arm64 slice (Apple Silicon requires a signature, Intel
+	# does not), so the universal file would read as unsigned to codesign. Sign
+	# it ad hoc when codesign is here (any Mac); elsewhere the game's release
+	# workflow signs it when it bundles the loader.
+	if [ "$(uname -s)" = Darwin ] && command -v codesign >/dev/null 2>&1; then
+		codesign --force --sign - "$U/libesdado.dylib" || die "could not sign the universal dylib"
+		codesign --verify --verbose=1 "$U/libesdado.dylib" || die "the universal dylib's signature does not verify"
+		HOW="$HOW, signed ad hoc"
+	else
+		say "  note: no codesign here; the x86_64 slice stays unsigned"
+	fi
 	say "== checking macos-universal (made with $HOW)"
 	if command -v file >/dev/null 2>&1; then say "  file: $(file -b "$U/libesdado.dylib")"; fi
 	$REL "$RELPY" inspect "$U/libesdado.dylib" --arch aarch64,x86_64 --version "$VERSION" \
