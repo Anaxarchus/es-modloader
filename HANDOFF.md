@@ -7,7 +7,45 @@ mod API; read it next. This file is the working log around it. Entries before
 "The split" describe the harness as it was inside the game (`modding/` in the
 game's repository); paths there are the old ones.
 
-Last updated 2026-10-27 (the split: the loader is its own repository).
+Last updated 2026-10-27 (releasing with tools/release.sh).
+
+## Releasing (2026-10-27)
+
+`tools/release.sh <version> [--publish] [--allow-dirty] [--skip-tests]
+[--no-universal] [--targets ...] [--repo OWNER/REPO]` builds, checks, tests,
+packages and publishes a GitHub release from the Mac (or Linux); see README.md,
+Releasing. Pieces:
+
+* `tools/zig-linux.cmake`: Linux with zig, glibc pinned by `ZIG_TARGET`
+  (`x86_64-linux-gnu.2.28`). Trap: clang prints the triple for `-dumpmachine`
+  with a glibc suffix and then *fails*, which broke Dado's engine build; the
+  wrapper in `zig-toolchain.cmake` answers `-dumpmachine` itself for those
+  targets.
+* zig links its own runtime's DWARF into ELF and PE libraries (6.9 MB instead of
+  1.3 MB, with build paths in it), so `-Wl,-S` now applies to every Release
+  build, not only macOS. Release builds are stripped of debug information.
+* `LOADER_VERSION` (CMake cache, default the project version) sets
+  `ESDADO_VERSION`, the "Dado loader <version>" name.
+* `tools/release.py`: `inspect` parses Mach-O (and fat), ELF and PE itself
+  (exports, minos, GLIBC_ versions, NEEDED, DLL imports, ad-hoc signature,
+  version string), since the Mac has no llvm-nm or readelf by default; `lipo`
+  writes a fat Mach-O when neither `lipo` nor `llvm-lipo` is there; `pack`
+  writes reproducible zip/tar.gz; `sums` replaces sha256sum/shasum.
+* Engine cache: Dado keys the QuickJS build by the compiler wrapper's path,
+  which is in the build folder, so the script always builds in the same
+  `build-release/<target>/` (cleaned each time) to hit the cache.
+* zig's Mach-O linker lists `__dso_handle` and `__mh_dylib_header` in the
+  export trie; the check allows those two.
+
+Checked in the VM (Linux aarch64, zig 0.16.0) with `tools/release.sh 0.1.0-test
+--allow-dirty`: all five targets build and pass every check (arm64 dylib minos
+11.0, x86_64 10.15; both .so need only GLIBC_2.17; the DLL imports KERNEL32 and
+the UCRT `api-ms-win-crt-*` DLLs only); the universal dylib was made by
+`release.py lipo` (`file`: "Mach-O universal binary with 2 architectures"); the
+linux-aarch64 build passed the fake-host test; and a second run gave
+byte-identical libraries and archives. Not tried: running it on the Mac
+itself (zig targeting macOS from a macOS host, Apple's `lipo`), and `--publish`.
+The repository has no LICENSE yet; the script warns and ships without one.
 
 ## The split (2026-10-27): the loader is its own repository
 
@@ -123,7 +161,7 @@ that ABI the game's own, loader-neutral API.
 | Game hooks (in the game) | `Engine.cpp` (Step, Place), `MapPanel.cpp` (DrawMap), `PlanetPanel.cpp` (Landed, the button, key `k`), `main.cpp` (Shutdown), `PlayerInfo.cpp` (conditions `mod loaders`, `mods loaded`; formerly `dado harness`, `dado mods loaded`), `Planet.h/.cpp` (`DefenseFleets()`), `Entity.h` (friend) |
 
 The Mac is an ARM Mac mini. Paths there are under the user's home folder (`~`).
-The game's user data is in `~/Library/Application Support/endless-sky`. Claude's
+The game's user data is in `~/Library/Application Support/argosy`. Claude's
 device bridge cannot read that folder (it is a protected location), so ask the
 user for log lines or files from it.
 
@@ -133,7 +171,7 @@ The game builds as plain Endless Sky (no Dado option any more). The loader:
 
 * Mac: `./build-mac.sh` (or `cmake -B build -G Ninja && cmake --build build`),
   then `tools/install.sh` puts `libesdado.dylib` in
-  `~/Library/Application Support/endless-sky/modloaders`.
+  `~/Library/Application Support/argosy/modloaders`.
 * Linux, or the VM: `cmake -B build -G Ninja && cmake --build build`;
   `./build-mac.sh` there cross-builds the Mac dylib with zig into `build-mac/`.
 

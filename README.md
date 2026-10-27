@@ -133,6 +133,12 @@ links `src/loader.c`, `esmod.c`, the shim and the engine into one library
 that exports `es_loader_init` and nothing else (`-Wl,--no-undefined` on
 Linux). `ESDADO_TRIPLE` overrides the triple dadoc builds for.
 
+**Linux, cross-built with zig** for an old glibc (what releases use):
+`ZIG_TARGET=x86_64-linux-gnu.2.28 cmake -B build-linux -G Ninja
+-DCMAKE_BUILD_TYPE=Release -DCMAKE_TOOLCHAIN_FILE=tools/zig-linux.cmake`.
+`-DLOADER_VERSION=<version>` sets the version the loader reports (default:
+the project's, 0.1.0). For every platform at once, see [Releasing](#releasing).
+
 Other targets: `install-loader` (below), `dado_mods` (rebuild the examples'
 and the in-game test's `.js`) and `dado_sdk` (regenerate `sdk/es/game.dado`
 after changing `Game.dados`).
@@ -150,9 +156,17 @@ folder's `modloaders`:
 
 | | |
 |---|---|
-| macOS | `~/Library/Application Support/endless-sky/modloaders` |
-| Linux | `~/.local/share/endless-sky/modloaders` |
-| Windows | `%APPDATA%\endless-sky\modloaders` |
+| macOS | `~/Library/Application Support/argosy/modloaders` |
+| Linux | `~/.local/share/argosy/modloaders` |
+| Windows | `%APPDATA%\argosy\modloaders` |
+
+These are the folders of **Argosy**, the Endless Sky fork the mod API comes
+from ([Anaxarchus/endless-sky](https://github.com/Anaxarchus/endless-sky)). It
+keeps its own config folder, `argosy`, apart from an Endless Sky install's
+`endless-sky` folder; to bring saves over, copy `saves/` from the old folder.
+Argosy's releases already ship this loader in `<resources>/modloaders`; a
+loader in the config folder's `modloaders` replaces the bundled one of the same
+file name, which is how to try a newer loader.
 
 The game logs each loader it opens, and the loader logs each mod it loads
 (`dado: loaded mod "hull_regen"`). The conditions `"mod loaders"` and
@@ -171,6 +185,102 @@ signed ad hoc only, so a game built with the hardened runtime (as notarized
 releases are) loads it only if that build is signed with library validation
 disabled (the `com.apple.security.cs.disable-library-validation`
 entitlement); a game you build yourself is not hardened and loads it as is.
+
+## Releasing
+
+`tools/release.sh` builds the loader for every platform from one machine (the
+Mac is the main host; Linux works too), checks each library, runs the tests,
+packages everything and, when asked, publishes a GitHub release. Every target
+is built with zig, the native one too, so a release is the same bytes whichever
+machine made it from the same sources and toolchain.
+
+**On the Mac, once:**
+
+* Dado installed (`~/dado`, with `dado` and `dadoc` in `~/.local/bin`); its zig
+  (`~/dado/zig/<version>/zig`) is found by itself, or set `ZIG`.
+* CMake and Ninja (`brew install cmake ninja`), Node (for `npx esbuild`, the
+  tests), and python3.
+* The Xcode command-line tools (`xcode-select --install`): python3, `c++` for
+  the fake-host test, and `lipo`. Without `lipo` the script writes the universal
+  dylib itself.
+* The GitHub CLI, logged in: `brew install gh`, then `gh auth login`.
+* The game's repository at `../endless-sky` (or `ES_GAME`), so the API header
+  can be checked.
+
+**A release:**
+
+```sh
+git commit ... && git push                  # the release is of a clean, pushed commit
+tools/release.sh 0.2.0                      # build, check, test, package; prints the gh command
+tools/release.sh 0.2.0 --publish            # ... and create the GitHub release v0.2.0
+tools/release.sh 0.2.0-beta.1 --publish     # a version with "-" is published as a prerelease
+```
+
+Options: `--allow-dirty` (build uncommitted changes; without it a dirty
+worktree, or a repository with no commits, is refused), `--skip-tests`,
+`--no-universal` (ship the two macOS builds separately), `--targets
+macos-arm64,linux-x86_64,...` (a subset), `--repo OWNER/REPO` (default
+`$ES_MODLOADER_REPO`, else `Anaxarchus/es-modloader`). `ES_GLIBC` changes the
+oldest glibc (default 2.28); `SOURCE_DATE_EPOCH` the archives' timestamps
+(default: the commit's time).
+
+What it does, in order:
+
+1. Checks the version (`1.2.3` or `1.2.3-pre.1`; a leading `v` is dropped), the
+   worktree, and `tools/sync-api.sh --check` (a warning when the game's header
+   is not found).
+2. Builds Release from clean in `build-release/<target>/`, with
+   `-DLOADER_VERSION=<version>` so the library calls itself
+   `Dado loader <version>`:
+
+   | Target | zig target | Library |
+   |---|---|---|
+   | `macos-arm64` | `aarch64-macos.11.0` | `libesdado.dylib` |
+   | `macos-x86_64` | `x86_64-macos.10.15` | `libesdado.dylib` |
+   | `linux-x86_64` | `x86_64-linux-gnu.2.28` (`tools/zig-linux.cmake`) | `libesdado.so` |
+   | `linux-aarch64` | `aarch64-linux-gnu.2.28` | `libesdado.so` |
+   | `windows-x86_64` | `x86_64-windows-gnu` | `esdado.dll` |
+
+3. Checks every library with `tools/release.py inspect` (plain Python, no
+   binutils needed): its format and architecture, that it exports
+   `es_loader_init` and nothing else, that it names the release's version, the
+   minimum macOS of each Mach-O slice (11.0 and 10.15, and an ad-hoc signature
+   on arm64), the newest `GLIBC_` symbol version (at most 2.28) and the shared
+   libraries an ELF library needs, and that the DLL imports only Windows's
+   own DLLs.
+4. Joins the two macOS builds into one universal `libesdado.dylib` (`lipo`,
+   else `llvm-lipo`, else `tools/release.py lipo`; zig has no lipo) and checks
+   it again.
+5. Runs the fake-host test (`tools/dado-mods.sh test`) on the build this machine
+   can load: on an Apple Silicon Mac the universal dylib, on Linux its own
+   architecture's `.so`.
+6. Writes `dist/<version>/`:
+
+   ```
+   es-modloader-<version>-macos-universal.zip
+   es-modloader-<version>-linux-x86_64.tar.gz
+   es-modloader-<version>-linux-aarch64.tar.gz
+   es-modloader-<version>-windows-x86_64.zip
+   SHA256SUMS
+   RELEASE_NOTES.md                 (the release's text; not uploaded)
+   ```
+
+   Each archive holds one folder with the library, `README.md`, `INSTALL.txt`
+   (where the `modloaders` folder is on each system, and the Gatekeeper
+   `xattr -d com.apple.quarantine` step), the repository's `LICENSE` when
+   there is one, and `licenses/` with the licences of the code linked in
+   (Dado's runtime and QuickJS-ng). The archives are reproducible: entries
+   sorted, fixed timestamps, owners and modes, written by Python's `zipfile`,
+   `tarfile` and `gzip` rather than the host's zip and tar.
+7. With `--publish`: `gh release create v<version> <archives> SHA256SUMS
+   --notes-file dist/<version>/RELEASE_NOTES.md`, as a prerelease when the
+   version has a `-`, at the current commit (`--target`), or at an existing
+   tag `v<version>` (`--verify-tag`), which must already be pushed. Without
+   `--publish` it prints that command.
+
+The release notes give the loader version, the mod API number (from
+`include/es_api.h`), the commit, the downloads with their minimum systems, the
+checksums, and that the loader needs an Endless Sky build with that mod API.
 
 ## Where mods go: `scripts/`
 

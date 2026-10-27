@@ -121,7 +121,14 @@ set_target_properties(esdado PROPERTIES
 if(WIN32)
 	set_target_properties(esdado PROPERTIES PREFIX "")
 endif()
-target_compile_definitions(esdado PRIVATE _GNU_SOURCE "ESDADO_VERSION=\"${PROJECT_VERSION}\"")
+# The version the loader reports (EsLoader::name, "Dado loader <version>"):
+# tools/release.sh passes the release's, e.g. -DLOADER_VERSION=0.2.0-beta.1.
+set(LOADER_VERSION "${PROJECT_VERSION}" CACHE STRING "The version the loader reports in its name (default: the project version).")
+if(NOT LOADER_VERSION MATCHES "^[0-9A-Za-z.+-]+$")
+	message(FATAL_ERROR "LOADER_VERSION \"${LOADER_VERSION}\" may hold only letters, digits, '.', '+' and '-'")
+endif()
+message(STATUS "esdado: loader version ${LOADER_VERSION}")
+target_compile_definitions(esdado PRIVATE _GNU_SOURCE "ESDADO_VERSION=\"${LOADER_VERSION}\"")
 target_include_directories(esdado PRIVATE include "${GEN}" "${DADO_QJS_DIR}")
 # Generated code: warnings are not for it.
 set_source_files_properties("${GEN}/esmod.c" PROPERTIES COMPILE_OPTIONS "-funsigned-char;-w")
@@ -135,14 +142,18 @@ target_link_libraries(esdado PRIVATE "${DADO_QJS_DIR}/libquickjs.a" Threads::Thr
 # -exported_symbol); on ELF targets a version script hides them.
 if(APPLE)
 	set_property(SOURCE "${GEN}/esmod.c" APPEND PROPERTY COMPILE_DEFINITIONS "DADO_EXPORT=__attribute__((used))")
-	# A release dylib carries no debug map (stabs naming the build's absolute
-	# paths), so two builds of the same sources are the same bytes.
-	target_link_options(esdado PRIVATE "$<$<CONFIG:Release,MinSizeRel>:LINKER:-S>")
 elseif(NOT WIN32)
 	target_link_libraries(esdado PRIVATE m)
 	target_link_options(esdado PRIVATE "LINKER:--no-undefined"
 		"LINKER:--version-script=${CMAKE_CURRENT_SOURCE_DIR}/src/exports.map")
 	set_property(TARGET esdado APPEND PROPERTY LINK_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/exports.map")
+endif()
+
+# A release library carries no debug information (a dylib's debug map, the
+# DWARF zig links in from its own runtime on ELF and PE targets), which names
+# the build's absolute paths: two builds of the same sources are the same bytes.
+if(NOT MSVC)
+	target_link_options(esdado PRIVATE "$<$<CONFIG:Release,MinSizeRel>:LINKER:-S>")
 endif()
 
 # Copy the library into the game's modloaders folder for this user, or

@@ -1,8 +1,8 @@
 #!/bin/sh
 # Copies the built loader into the game's "modloaders" folder for this user:
-#   macOS    ~/Library/Application Support/endless-sky/modloaders
-#   Linux    ${XDG_DATA_HOME:-~/.local/share}/endless-sky/modloaders
-#   Windows  %APPDATA%/endless-sky/modloaders
+#   macOS    ~/Library/Application Support/argosy/modloaders
+#   Linux    ${XDG_DATA_HOME:-~/.local/share}/argosy/modloaders
+#   Windows  %APPDATA%/argosy/modloaders
 #
 #   tools/install.sh [--to <dir>] [<library>]
 #
@@ -27,9 +27,9 @@ fi
 [ -n "$LIB" ] && [ -f "$LIB" ] || { echo "install: no library (build first, or name it)" >&2; exit 1; }
 if [ -z "$TO" ]; then
 	case $(uname -s) in
-	Darwin) TO="$HOME/Library/Application Support/endless-sky/modloaders" ;;
-	MINGW*|MSYS*|CYGWIN*) TO="${APPDATA:?}/endless-sky/modloaders" ;;
-	*) TO="${XDG_DATA_HOME:-$HOME/.local/share}/endless-sky/modloaders" ;;
+	Darwin) TO="$HOME/Library/Application Support/argosy/modloaders" ;;
+	MINGW*|MSYS*|CYGWIN*) TO="${APPDATA:?}/argosy/modloaders" ;;
+	*) TO="${XDG_DATA_HOME:-$HOME/.local/share}/argosy/modloaders" ;;
 	esac
 fi
 mkdir -p "$TO"

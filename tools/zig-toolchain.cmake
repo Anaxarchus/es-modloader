@@ -1,4 +1,4 @@
-# Shared by zig-macos.cmake and zig-windows.cmake: compile and link with
+# Shared by zig-macos.cmake, zig-linux.cmake and zig-windows.cmake: compile and link with
 # `zig cc -target ${ZIG_TARGET}`, through a wrapper script written into the
 # build folder with the target in it (so every compile gets it, whatever the
 # environment), and archive with `zig ar`. ZIG names zig when it is not on PATH.
@@ -11,6 +11,11 @@ file(MAKE_DIRECTORY "${_wrapper_dir}")
 foreach(_tool cc ar ranlib)
 	if(_tool STREQUAL "cc")
 		set(_line "exec \"${_zig}\" cc -target ${ZIG_TARGET} \"$@\"")
+		# A glibc-pinned target (x86_64-linux-gnu.2.28): clang prints the triple
+		# for -dumpmachine and then fails on its glibc suffix, so answer it here.
+		if(ZIG_TARGET MATCHES "^([^-]+)-linux-gnu[.][0-9.]+$")
+			set(_line "if [ \"$#\" = 1 ] && [ \"$1\" = -dumpmachine ]; then echo ${CMAKE_MATCH_1}-unknown-linux-gnu; exit 0; fi\n${_line}")
+		endif()
 	else()
 		set(_line "exec \"${_zig}\" ${_tool} \"$@\"")
 	endif()

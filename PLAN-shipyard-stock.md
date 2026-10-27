@@ -110,7 +110,7 @@ the current ones.)
    npm run check -- mods/corporations    # 600 steps against FakeGame
    npm run deploy -- mods/corporations --to ../endless-sky/plugins
                                          # without --to it goes to the user's plugins
-                                         # folder (~/Library/Application Support/endless-sky/plugins).
+                                         # folder (~/Library/Application Support/argosy/plugins).
                                          # It copies over the installed plugin in place, then
                                          # removes files the build no longer has (warning if it can't).
    node mods/corporations/tools/balance.mjs   # long simulation, prints yearly stats
