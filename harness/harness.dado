@@ -8,10 +8,13 @@ import sdk "../sdk/es"
 //
 // A mod is a class extending `es.Mod` (sdk/es/Mod.dados), built as one
 // JavaScript file, or plain JavaScript extending the global `Mod` that
-// `prepare` defines before the mod loads (probe.js). It is refused unless it
-// reports a mod API version this loader speaks. A hook that fails is reported
-// here, and the C side switches it off (on_step, on_day, on_enter,
-// can_outfitter) or leaves it on (the hooks a player's click runs).
+// `prepare` defines before the mod loads (probe.js). It is refused when it needs
+// a newer mod API than this loader speaks (Mod.min_api; for a mod built before
+// min_api, its api_version). Hooks are run by name (`call_*`), so a new hook
+// needs no change here: only its name, from the C side, and a default in
+// es.Mod. A hook that fails is reported here, worded as the C side's `mode`
+// says: it switches some off (on_step, on_day, on_enter, can_outfitter), and a
+// mod whose on_load fails is not loaded.
 //
 // The C side brackets every call into a mod's hook with the game's
 // hook_timing, and runs it under the watchdog; this class does neither, so a
@@ -20,6 +23,13 @@ private class Harness:
     foreign "probe.js":
         bool has_method(any o, string name)
         void install_globals(int api)
+        void bind_mod(any o, any game)
+        bool name_hook(int id, string name)
+        string hook_name(int id)
+        void invoke_int(int id, int a)
+        int invoke_str(int id, string s)
+        int invoke_json(int id, string args)
+        int min_api_of(any o)
 
     // core:script's code for a stopped script, and the text of the Error a
     // stop raises in it.
@@ -31,11 +41,11 @@ private class Harness:
     string name = ""
 
     // Define the globals a plain JavaScript mod builds on, then load the mod
-    // whose JavaScript is `<path>.js`, naming it `n` in messages. Answers the
-    // hooks it has (`hooks`, 0 or more) when it loaded and speaks a mod API
-    // this loader runs, or -1. Everything here may run the mod's code (its
-    // module's top level, api_version, getters and Proxy traps behind
-    // has_method), so the C side runs it all as one armed, bracketed call.
+    // whose JavaScript is `<path>.js`, naming it `n` in messages. Answers 0 when
+    // it loaded and this loader runs it, or -1. Everything here may run the
+    // mod's code (its module's top level, min_api and api_version, getters and
+    // Proxy traps), so the C side runs it, and the hook checks after it, as one
+    // armed, bracketed call.
     int prepare(string path, string n):
         name = n
         install_globals(sdk.MOD_API)
@@ -48,79 +58,77 @@ private class Harness:
         if !has_method(o, "api_version"):
             game.log("dado: mod \"" + name + "\" was refused: it does not extend es.Mod (or the global Mod)")
             return -1
-        try any version = o.api_version() else e:
+        // Mod API 10: a mod says which API it needs (min_api), and runs on any
+        // loader that speaks at least that. A mod built before min_api says only
+        // the API it was built for, which this loader must speak, as before.
+        try int needs = min_api_of(o) else e:
             if e.code == STOPPED || e.message.ends_with(STOP_TEXT):
                 return -1
             game.log("dado: mod \"" + name + "\" was refused: " + e.message)
             return -1
-        // The API only grows, so a mod built for this version or an earlier one runs.
-        if int(version) < 1 || int(version) > sdk.MOD_API:
-            game.log("dado: mod \"" + name + "\" was refused: it was built for mod API " + string(int(version)) + " and this loader speaks up to " + string(sdk.MOD_API))
+        if needs == -2:
+            game.log("dado: mod \"" + name + "\": its min_api() did not answer a whole number of at least 1; taken as 1")
+            needs = 1
+        if needs > sdk.MOD_API:
+            game.log("dado: mod \"" + name + "\" was refused: it needs mod API " + string(needs) + " and this loader speaks up to " + string(sdk.MOD_API))
             return -1
+        if needs < 0:
+            try any version = o.api_version() else e:
+                if e.code == STOPPED || e.message.ends_with(STOP_TEXT):
+                    return -1
+                game.log("dado: mod \"" + name + "\" was refused: " + e.message)
+                return -1
+            if int(version) < 1 || int(version) > sdk.MOD_API:
+                game.log("dado: mod \"" + name + "\" was refused: it was built for mod API " + string(int(version)) + " and this loader speaks up to " + string(sdk.MOD_API))
+                return -1
         obj = o
-        return hooks()
-
-    // Which hooks the mod has, one bit each in the order of HOOK_NAMES
-    // (src/loader.c): on_load is bit 0, on_step bit 1, ...
-    int hooks():
-        int bits = 0
-        int bit = 1
-        for i in 0..<12:
-            if has_method(obj, hook_name(i)):
-                bits = bits + bit
-            bit = bit * 2
-        return bits
-
-    // Run hook number `hook` (the bit numbers of `hooks`) with its arguments:
-    // `s` the system or outfit, `a` and `b` the numbers. Answers what
-    // can_outfitter answered (1 or 0), 0 for the other hooks, and -1 when the
-    // hook failed, which it reports.
-    int call(int hook, string s, int a, int b):
-        try int answer = run(hook, s, a, b) else e:
-            // Stopped by the watchdog (core:script's STOPPED): the loader says so.
-            if e.code == STOPPED || e.message.ends_with(STOP_TEXT):
-                return -2
-            string what = hook_name(hook)
-            if hook == 1 || hook == 2 || hook == 3 || hook == 6:
-                game.log("dado: mod \"" + name + "\" failed in " + what + " and its " + what + " is now off: " + e.message)
-            else if hook == 0:
-                game.log("dado: mod \"" + name + "\" failed in on_load and was not loaded: " + e.message)
-            else:
-                game.log("dado: mod \"" + name + "\" failed in " + what + ": " + e.message)
-            return -1
-        return answer
-
-    int run(int hook, string s, int a, int b):
-        if hook == 0:
-            obj.on_load(game)
-        else if hook == 1:
-            obj.on_step(game, a)
-        else if hook == 2:
-            obj.on_day(game, a)
-        else if hook == 3:
-            obj.on_enter(game, s)
-        else if hook == 4:
-            obj.on_planet_button(game)
-        else if hook == 5:
-            obj.on_panel(game, a)
-        else if hook == 6:
-            any answer = obj.can_outfitter(game, s)
-            bool active = answer
-            return 1 if active else 0
-        else if hook == 7:
-            obj.on_outfitter(game, s)
-        else if hook == 8:
-            obj.on_confirm(game, a)
-        else if hook == 9:
-            obj.on_panel_row(game, a)
-        else if hook == 10:
-            obj.on_panel_header(game, a)
-        else if hook == 11:
-            obj.on_number(game, a, b)
+        bind_mod(o, game)
         return 0
 
-    string hook_name(int hook):
-        []string names = ["on_load", "on_step", "on_day", "on_enter", "on_planet_button", "on_panel", "can_outfitter", "on_outfitter", "on_confirm", "on_panel_row", "on_panel_header", "on_number"]
-        if hook < 0 || hook >= names.len():
-            return "hook " + string(hook)
-        return names[hook]
+    // Give hook `hook` the id `id` (the C side's), and answer whether the mod
+    // has it: 1 or 0.
+    int has(int id, string hook):
+        return 1 if name_hook(id, hook) else 0
+
+    // Run hook `id` (named by `has` first) with one int, one string, or the
+    // arguments of a JSON array. Each answers what the hook answered (1 for
+    // truthy, as can_outfitter's true, else 0), -4 when the mod has no such
+    // hook, -2 when the watchdog stopped it, and -1 when it failed, which it
+    // reports as `mode` says: 0 plainly, 1 "and its <hook> is now off", 2 "and
+    // was not loaded".
+    // The int path is the hot one (on_step, every engine step, for every mod):
+    // the hook's answer is not needed there, and converting it would cost more
+    // than the call itself, so it answers 0. (`has` made sure the hook exists.)
+    int call_int(int id, int a, int mode):
+        try invoke_int(id, a) else e:
+            return failed(hook_name(id), mode, e.code, e.message)
+        return 0
+
+    // The hottest hook of all, on_step, called straight: the generic call costs
+    // a tenth more per mod and step (README, "Performance").
+    int call_step(int a, int mode):
+        try obj.on_step(game, a) else e:
+            return failed("on_step", mode, e.code, e.message)
+        return 0
+
+    int call_str(int id, string s, int mode):
+        try int answer = invoke_str(id, s) else e:
+            return failed(hook_name(id), mode, e.code, e.message)
+        return answer
+
+    int call_json(int id, string args, int mode):
+        try int answer = invoke_json(id, args) else e:
+            return failed(hook_name(id), mode, e.code, e.message)
+        return answer
+
+    int failed(string hook, int mode, int code, string message):
+        // Stopped by the watchdog (core:script's STOPPED): the loader says so.
+        if code == STOPPED || message.ends_with(STOP_TEXT):
+            return -2
+        if mode == 1:
+            game.log("dado: mod \"" + name + "\" failed in " + hook + " and its " + hook + " is now off: " + message)
+        else if mode == 2:
+            game.log("dado: mod \"" + name + "\" failed in " + hook + " and was not loaded: " + message)
+        else:
+            game.log("dado: mod \"" + name + "\" failed in " + hook + ": " + message)
+        return -1

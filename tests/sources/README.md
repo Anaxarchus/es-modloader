@@ -7,7 +7,9 @@ each enabled plugin:
 - `resources/`: the game's resources (name ""), with an `override_me` mod.
 - `Test Mods/`: every example and test mod, built into its `scripts/` by the
   test, plus the plain JavaScript mods here: mods built on the global `Mod`,
-  mods that never return (the watchdog), one that does not compile, and files
+  mods that never return (the watchdog), one that does not compile, one with no
+  min_api built for a newer API (`legacy_future`, refused), one whose min_api
+  is no whole number (`odd_min_api`, logged and run), and files
   that are not mods (`.hidden.js`, `notes.txt`, the folder `folder.js`).
 - `Zipped.zip/`: a folder whose name ends in `.zip`, standing in for a zipped
   plugin, which the loader skips.

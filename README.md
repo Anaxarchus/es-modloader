@@ -16,8 +16,10 @@ plugins talk to each other.
 
 The game knows nothing of Dado: it loads `libesdado.dylib` (macOS),
 `libesdado.so` (Linux) or `esdado.dll` (Windows) like any other loader. The
-loader speaks mod API 9 (`ES_API_VERSION`), and the mod API only grows: mods
-built for an earlier version keep working.
+loader speaks mod API 10 (`ES_API_VERSION`), and the mod API only grows: mods
+built for an earlier version keep working. It also runs on a game of mod API 9:
+the API 10 calls then answer their "nothing" (-1, 0, `""` or false) and do
+nothing, and `Game.has()` says what the game offers.
 
 **Writing mods:** modders use the mod SDK (`endless-sky-mod-sdk`), which
 targets this loader. It has the SDK, build and test tools, examples and editor
@@ -34,7 +36,8 @@ loader itself.
  first hook ──────── load_mods(paths, names) ─────▶ scans <source>/scripts/*.js, loads by name
  Engine step ─────── step / day / enter ──────────▶ for each mod:  hook_timing(mod, hook, 1)
  planet screen, ──── planet_button / panel / ... ─▶                watchdog armed
- outfitter, panels     (per mod, by name)                          esmod_call(slot, hook) ──▶ mod's own engine:
+ outfitter, panels,    (per mod, by name)                          esmod_call*(slot, hook id, args) ─▶ mod's own engine:
+ save, pilot, bus
                                                                    watchdog disarmed            Harness ─▶ mod.on_x(game)
                                                                    hook_timing(mod, hook, 0)        │
  EsHost table ◀── es_*() shim (generated from es_api.h) ◀── host_* (host.dado) ◀── Game ◀─────────┘
@@ -49,19 +52,28 @@ loader itself.
   from `es_api.h` by `tools/gen-host-shim.cmake` at build time: a plain C
   function `es_<field>` for every function of `EsHost`, forwarding to the
   game's table, and `es_shim_missing()`, which names a function the game's
-  table lacks. The harness calls these functions; dadoc checks its
-  declarations against the generated header.
+  table lacks. Functions added after mod API 9 (`ESDADO_MIN_HOST_API`, the
+  oldest game the loader runs on) are optional: `es_shim_missing()` does not
+  ask for them, their forward answers 0 or `""` when the game lacks them, and
+  `es_has_<field>()` says whether it has them. The harness calls these
+  functions; dadoc checks its declarations against the generated header.
 * **`harness/`** is a Dado package. `dadoc` transpiles it to one C file
   (`esmod.c`), linked with the QuickJS engine into the library.
-  - `entry.dado` exports `esmod_new`, `esmod_prepare`, `esmod_call`,
+  - `entry.dado` exports `esmod_new`, `esmod_prepare`, `esmod_has`,
+    `esmod_call`, `esmod_call_int`, `esmod_call_str`, `esmod_call_step`,
     `esmod_interrupt` and so on to `loader.c`. Each mod gets a slot: an engine
-    (a VM) of its own holding one `Harness`.
+    (a VM) of its own holding one `Harness`. Hooks are run **by name**: the C
+    side interns each hook name to an id, asks the mod once whether it has it
+    (`esmod_has(slot, id, name)`, which also tells the engine the name), and
+    then calls it by id with one int, one string, or a JSON array of
+    arguments. `on_step` has a fast path of its own (`esmod_call_step`).
   - `host.dado` declares the `es_*` functions and checks every value a script
     passes before it reaches the game.
   - `Game.dados` is the API mods see.
   - `harness.dado` loads one mod into its engine and runs its hooks.
-  - `probe.js` asks what a mod object offers, and defines the globals a plain
-    JavaScript mod builds on.
+  - `probe.js` asks what a mod object offers, runs its hooks by name
+    (`invoke_*`), reads `min_api`, and defines the globals a plain JavaScript
+    mod builds on.
 * **`sdk/es/`** is what a DadoScript mod builds against: `Mod.dados` (the base
   class), `game.dado` (`Game`'s declarations, generated from the harness) and
   `version.dado` (the mod API version, `MOD_API`).
@@ -520,6 +532,9 @@ Rules a mod lives by:
 | `on_panel_row(Game, int row)` | (API 6) when the player clicks a row of the table in this mod's panel. |
 | `on_number(Game, int token, int value)` | (API 6) when the player answers an `ask_number()` dialog with OK. |
 | `on_panel_header(Game, int column)` | (API 7) when the player clicks a column heading of the table on this mod's full screen. |
+| `on_save(Game)` | (API 10) just before the game writes the pilot to a file: taking off, quitting while landed, opening the load panel, the autosave when the player accepts a mission marked `autosave` (possibly in flight), a conversation's start. What the mod writes with `set_data` now lands in that file, so a mod can keep its state in memory and flush it here. Queries, `set_data`, conditions and stock work; panels and dialogs do not, and there is no ship snapshot, even in flight (`ship_count()` is 0). Its notifications arrive after the save, and are lost if the player then loads another pilot or quits. It may run twice for one save; never from inside another hook, nor for a pilot `on_pilot_loaded` has not run for. |
+| `on_pilot_loaded(Game)` | (API 10) once when the player makes or loads another pilot, and when the mods start with one: after `on_load` (and the notifications posted there), before any `on_day`, `on_enter` or `on_step` for it. Reset what the mod keeps in memory; read the new pilot's data. |
+| `on_notification(Game, string name, string payload, string sender)` | (API 10) a notification another mod posted with `notify()`, which this mod listens for. Delivered after the step's hooks, after a hook the player started, after landing, after `on_pilot_loaded`, and once all mods have loaded; never to the sender. |
 
 In each engine step the game runs `on_day` for every new day, then
 `on_enter` if the player has arrived in a system since the last step, then
@@ -550,7 +565,9 @@ Some details follow from how the game works:
 | `log(Game, string)` | log a line prefixed with `name()` |
 | `every(int step, float seconds) bool` | true once every `seconds` of game time |
 | `player_ships(Game) []int` | the player's ships in the system that are not disabled |
-| `api_version() int` | the API the mod was built against; don't override |
+| `api_version() int` | the API the mod was built against (the SDK's `MOD_API`); informational since API 10, don't override |
+| `min_api() int` | (API 10) the oldest mod API the mod runs on: the loader refuses the mod only when this is newer than it speaks. Default 1. A mod built before API 10 has none, and then the loader checks `api_version()` as before. For a feature a mod can do without, check `game.has()` instead |
+| `on_save(Game)`, `on_pilot_loaded(Game)`, `on_notification(Game, name, payload, sender)` | hooks (API 10); the defaults do nothing |
 
 These are compiled into each mod, so calling them costs nothing extra. A plain
 JavaScript mod gets the same members from the global `Mod`.
@@ -580,7 +597,7 @@ range answers zeros, `false` or `""`, and changes nothing.
 | `ship_count() int`, `flagship() int` | ships in the system; the flagship's index or -1 |
 | `ship_name(i)`, `ship_model(i)` | names |
 | `is_player(i)`, `is_disabled(i)` | flags |
-| `hull(i)`, `max_hull(i)`, `shields(i)`, `max_shields(i)`, `energy(i)`, `fuel(i)` | levels |
+| `hull(i)`, `max_hull(i)`, `shields(i)`, `max_shields(i)`, `energy(i)`, `fuel(i)` | levels, as absolute amounts (for energy and fuel as fractions, see `energy_fraction` and `fuel_fraction`, API 10) |
 | `set_hull(i, v)`, `set_shields(i, v)` | set a level; clamped to `[0, max]` |
 
 **The galaxy** (API 2)
@@ -745,6 +762,27 @@ The game also provides two read-only conditions that missions can test:
 `"mod loaders"` is how many mod loaders the game opened (formerly `"dado harness"`),
 and `"mods loaded"` is how many mods they loaded (formerly `"dado mods loaded"`).
 
+**Trade, ships, outfitter stock, the bus and more** (API 10)
+
+| Method | |
+|---|---|
+| `trade_price(system, commodity) int` | what the trading panel charges there now; 0 for no market, -1 for an unknown name (and on an API 9 game) |
+| `trade_base_price(system, commodity) int` | the price the system's data sets, before supply and demand move it (events that change the system's trade change it too: the game keeps no pre-event price); 0 / -1 as above |
+| `commodity_count() int`, `commodity_name(k) string` | the standard commodities, in the trading panel's order |
+| `cargo(commodity) int` | tons the player carries: pooled while landed, and in the holds of their ships in the system that are not parked |
+| `ship_park(ship, on) bool`, `ship_parked(ship) bool` | park or unpark one of the player's ships, by UUID, wherever it is; not the flagship, not a disabled ship. Only from a hook the player started, while landed |
+| `ship_remove(ship) bool` | take one of the player's ships out of the fleet for good (as disowning it: no money), e.g. sold to a company; the flagship only when another ship landed with the player can take its place. Only from a hook the player started, while landed, and not from the outfitter's hooks |
+| `outfit_stock_on(on)`, `outfit_stock(planet, outfit) int`, `set_outfit_stock(planet, outfit, n)` | outfitter stock, as shipyard stock: while on, an outfitter shows and enforces the count of each outfit it sells that a mod tracks there (after any the player sold there, which it sells back first). Off unless a mod turns it on (call it from `on_enter`); the counts are saved (`outfit stock`) |
+| `notify(name, payload) bool` | post a notification (a name of 1..128 bytes of letters, digits and `. _ : / -`; a payload of up to 64 KiB, JSON by convention) to the mods, under any loader, that listen for it. Queued; delivered later, never to the sender, and the game names the sender. False when refused or dropped (1024 queued at most; 256 per mod between deliveries) |
+| `listen(pattern)`, `unlisten(pattern)` | receive notifications by exact name or prefix ending in `*` ("diplomacy.*", "*"), in `on_notification`; lasts across pilots: listen in `on_load` |
+| `has(feature) bool` | whether the game offers a feature: `"call:<name>"` for a C API call added since API 9 (`"call:ship_park"`), `"on_save"`, `"on_pilot_loaded"`, `"on_notification"`, and `"notify"`, `"trade_price"`, `"outfit_stock"`, `"ship_parking"`, `"cargo"`, `"timing_section"`, `"ship_fractions"`. False for everything on an API 9 game |
+| `timing_section(name)` | split the running hook's time into named sections for the game's timing report (mod, hook, section); `""` ends the section |
+| `energy_fraction(i) float`, `fuel_fraction(i) float` | ship i's energy and fuel as 0..1 of capacity (`energy(i)` and `fuel(i)` are absolute amounts) |
+
+On a game of mod API 9 every one of these answers -1 (`trade_price`,
+`trade_base_price`, `outfit_stock`), 0, `""` or false, and does nothing: the
+loader checks the game's table (`es_has_<field>`) instead of failing.
+
 ### Persistence
 
 The game saves the pilot, not the mods. What lasts:
@@ -758,8 +796,14 @@ The game saves the pilot, not the mods. What lasts:
 * **Shipyard stock counts** set with `set_ship_stock()` (API 9). The switch
   that makes shipyards use them, `ship_stock_on()`, and the order notes are
   not saved.
+* **Outfitter stock counts** set with `set_outfit_stock()` (API 10); the
+  switch, `outfit_stock_on()`, is not saved.
+* **`set_data()`** text, saved with the pilot. Since API 10 a mod may keep its
+  state in memory and write it in `on_save`, which runs just before every
+  save, and reset it in `on_pilot_loaded`.
 
-What does not last: spawned ships, map overlays, the planet button and panels.
+What does not last: spawned ships, map overlays, the planet button and panels,
+queued notifications.
 The mod rebuilds them from its conditions, in `on_enter` (which runs again on
 landing, after taking off and after loading another pilot) and `on_day`.
 
@@ -777,6 +821,18 @@ slow hooks and each mod's share of the frame at exit); see the game's
 
 Per call into a mod the loader takes a lock twice (the watchdog) and calls
 `hook_timing` twice. Each mod's engine costs well under a megabyte.
+
+Hooks are dispatched by name since API 10. Measured on 2026-10-28 in the
+aarch64 VM, 20 plain mods with an `on_step` that counts, 20000 steps (a bench
+built on `tests/fake_host.cpp`'s host): the numbered dispatch of 0.1.0 took
+about 9.9 us per step (490 ns per mod and hook); the generic path through
+`probe.js` (`invoke_int`) took 10.7 us (540 ns), and the hook's answer
+converted to an int cost another 250 ns, so the int path drops it. `on_step`
+therefore has a fast path that calls the mod's method directly
+(`esmod_call_step`): 8.2 to 8.4 us per step (410 to 420 ns per mod), faster
+than before. A method
+call (`mod[name](game, a)`) is also faster in QuickJS than `f.call(mod, game,
+a)`.
 
 ## Tests
 
@@ -799,9 +855,20 @@ tests/ingame/run.sh <endless-sky executable> [<game repository>]
   the fake act for the mod of the open `hook_timing` bracket, as in the game,
   so every "lands under the mod's name" check is a check of mod identity. It
   covers:
-  - `es_loader_init`: declining an old game, a short or holed host table and
+  - `es_loader_init`: declining an API 8 game, a short or holed host table and
     a small `EsLoader`; writing nothing past its table; exporting nothing but
     `es_loader_init`;
+  - mod API 10 through `api10_probe` and `api10_pong`: trade, cargo, parking
+    and removing ships, outfitter stock, `has`, timing sections, the
+    fractions, `on_save` (its `set_data` lands, its post waits for the next
+    drain) and `on_pilot_loaded`, and the bus: ping-pong between the two mods
+    in one drain, no self-delivery, the sender as the game recorded it, an
+    endless cascade cut after 4 rounds, the 256-posts limit and a bad name.
+    The fake host's bus follows the game's `ModBus` (which the game's
+    `tests/modloader` tests across two C loaders);
+  - the version gate: `wrong_api` (min_api 999) is refused, `future_sdk`
+    (api_version 999, min_api 1) runs, and `legacy_future.js` (no min_api,
+    api_version 999) is refused by its api_version, as before;
   - the example (`examples/hull_regen`) and the adversarial mods in
     `tests/mods`: one throws, one passes bad ship indices, one does not extend
     `es.Mod`, one claims API 999; the API probes `api2_probe` ... `api9_probe`,
@@ -818,6 +885,10 @@ tests/ingame/run.sh <endless-sky executable> [<game repository>]
     hooks run on in the same step and the next;
   - that loading each mod is bracketed as its `"load"`, every bracket was
     closed, never nested, and that no mod-scoped call came outside one.
+  - Then (`fake_host --api9-host`) the loader on a game of mod API 9: a host
+    table that ends at `ship_in_stock` and an API 9 `EsLoader` reserve. The
+    loader accepts it, writes nothing past the reserve, loads every mod, and
+    `api10_probe`'s API 10 calls answer -1, 0, `""` or false without failing.
   - Then, twice (`fake_host --watchdog`, with load/hook limits of 2000/250 ms
     and 300/1000 ms), the mods in `tests/sources-watchdog`: an endless
     `api_version`, a getter and a `Proxy` trap the hook check runs, an endless
@@ -842,8 +913,9 @@ tests/ingame/run.sh <endless-sky executable> [<game repository>]
 The game owns the API. To add a function:
 
 1. In the game: add it to the end of `EsHost` in `source/modding/es_api.h`
-   (bumping `ES_API_VERSION` for a release that adds to the API) and fill it
-   in `ModHarness.cpp`'s host table.
+   (bumping `ES_API_VERSION` for a release that adds to the API), fill it
+   in `ModHarness.cpp`'s host table, and register it in `Features()` there
+   (`"call:<field>"`), which `api_has` and `Game.has()` answer from.
 2. Here: `tools/sync-api.sh` copies the header (and fails, so you notice).
    The build forwards the new function automatically (the shim is generated).
 3. Declare it in the `foreign` block in `harness/host.dado` as `es_<field>`,
@@ -865,11 +937,16 @@ one takes or answers: a loader runs every mod built for its version or an
 earlier one, and refuses only newer ones.
 
 A new hook needs a field at the end of `EsLoader` in the game, a default in
-`sdk/es/Mod.dados` and in `probe.js`'s global `Mod`, a number in
-`harness/harness.dado` (`run`, `hook_name`) and in `src/loader.c`
-(`HOOK_NAMES`) with an entry that calls `RunHook`, and driving in
-`tests/fake_host.cpp`. Run a hook only if the mod has the method: a mod built
-for an earlier API bundles an `es.Mod` without it.
+`sdk/es/Mod.dados` and in `probe.js`'s global `Mod`, an entry in
+`src/loader.c` that calls `EachMod` or `OneMod` with the hook's **name** and
+its arguments (one int, one string, or a JSON array: `JsonStrings` encodes
+strings), and driving in `tests/fake_host.cpp`. Nothing is numbered: the
+harness runs any hook by name, and asks the mod whether it has it on its first
+call (adding the name to `KNOWN_HOOKS` asks while the mod loads instead). A
+mod built for an earlier API bundles an `es.Mod` without the hook, and then it
+simply does not run. A new host call that a mod can do without should be
+optional (it is, when it comes after `ESDADO_MIN_HOST_API`): its `host_*`
+wrapper answers the call's "nothing" when `es_has_<field>()` is 0.
 
 ## A larger example
 

@@ -20,9 +20,18 @@ class Mod
 // game. Hooks run on the game's main thread while the simulation is paused; a
 // hook that throws is reported once and switched off for that mod.
 
-// The mod API this mod was built against; the game refuses a mismatch. Do not override.
+// The mod API this mod was built against (the SDK's MOD_API): for information.
+// Do not override; to say which API the mod needs, override min_api.
 int api_version():
     return MOD_API
+
+// (Mod API 10.) The oldest mod API this mod runs on: a loader refuses the mod
+// only when this is newer than the API it speaks. The default, 1, runs it on
+// every loader that knows min_api; a mod that cannot do without a newer call
+// returns that call's API version. For a feature it can do without, check
+// Game.has("<feature>") instead, so the mod still runs on an older game.
+int min_api():
+    return 1
 
 // The mod's name, used by `log`. Override it.
 string name():
@@ -83,6 +92,32 @@ void on_panel_header(Game game, int column):
 
 // (Mod API 6.) Called when the player answers a Game.ask_number dialog with OK.
 void on_number(Game game, int token, int value):
+    return
+
+// (Mod API 10.) Called just before the game writes the pilot to a file: when
+// the player takes off, quits while landed or opens the load panel, for the
+// autosave when the player accepts a mission marked `autosave` (which may be
+// in flight), and when a conversation starts (a save during it writes that
+// moment). What the mod writes with Game.set_data now goes into that file, so
+// a mod may keep its state in memory and write it here only. Queries,
+// set_data, conditions and stock work; panels and dialogs do not, and there is
+// no ship snapshot even in flight (ship_count is 0). It may run twice for one
+// save. What it posts with notify arrives after the save, and is lost when the
+// player then loads another pilot or quits.
+void on_save(Game game):
+    return
+
+// (Mod API 10.) Called once when the player makes or loads another pilot (and
+// when the mods start with one): after on_load, before any on_day, on_enter or
+// on_step for that pilot. Reset what the mod keeps in memory for the last pilot
+// here, and read this one's saved data. Panels and dialogs do not work here.
+void on_pilot_loaded(Game game):
+    return
+
+// (Mod API 10.) A notification another mod posted with Game.notify, named
+// `name`, which this mod listens for (Game.listen); `sender` is the mod that
+// posted it, as the game recorded it. Panels and dialogs do not work here.
+void on_notification(Game game, string name, string payload, string sender):
     return
 
 // Write a line to the game's log, prefixed with the mod's name.

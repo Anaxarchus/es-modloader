@@ -9,12 +9,21 @@
  *
  *     hook_timing(mod, hook, 1)   the game learns which mod runs
  *     arm the watchdog
- *     esmod_call(slot, hook, ...) the harness runs the hook in the mod's engine
+ *     esmod_call*(slot, "on_...", ...)  the harness runs the hook, by name, in
+ *                                 the mod's engine
  *     disarm the watchdog
  *     hook_timing(mod, hook, 0)
  *
  * so the brackets are always closed, even when the watchdog stops the mod,
- * and never nest (calls from inside a hook are refused). */
+ * and never nest (calls from inside a hook are refused).
+ *
+ * Hooks are named, not numbered: RunHook takes the hook's name and its
+ * arguments (one int, one string, or a JSON array), and the harness calls the
+ * mod's method of that name. Which hooks a mod has is asked by name too, and
+ * remembered per mod: the hooks the game's entries run are asked about while
+ * the mod loads (under the load's bracket and watchdog), any other on its first
+ * call. So a new hook needs an entry here that calls RunHook with its name,
+ * and a default in es.Mod; nothing else. */
 #include "es_api.h"
 #include "esmod.h"
 
@@ -45,16 +54,22 @@ extern const EsHost *es_shim_game;
 const char *es_shim_missing(const EsHost *host);
 #define game es_shim_game
 
-/* The hooks, numbered as the harness numbers them (harness/harness.dado). */
-enum {
-	H_LOAD, H_STEP, H_DAY, H_ENTER, H_PLANET_BUTTON, H_PANEL, H_CAN_OUTFITTER,
-	H_OUTFITTER, H_CONFIRM, H_PANEL_ROW, H_PANEL_HEADER, H_NUMBER, H_COUNT
-};
-static const char *const HOOK_NAMES[H_COUNT] = {
+#ifndef ESDADO_MIN_HOST_API
+#define ESDADO_MIN_HOST_API 9
+#endif
+
+/* The hooks the game's entries run, asked about while each mod loads. A hook
+ * not listed here works as well; a mod is asked about it on its first call. */
+static const char *const KNOWN_HOOKS[] = {
 	"on_load", "on_step", "on_day", "on_enter", "on_planet_button", "on_panel", "can_outfitter",
-	"on_outfitter", "on_confirm", "on_panel_row", "on_panel_header", "on_number"
+	"on_outfitter", "on_confirm", "on_panel_row", "on_panel_header", "on_number",
+	"on_save", "on_pilot_loaded", "on_notification",
 };
-#define BIT(hook) (1u << (hook))
+#define KNOWN_COUNT ((int)(sizeof(KNOWN_HOOKS) / sizeof(KNOWN_HOOKS[0])))
+
+/* How a hook's arguments reach the mod: one int, one string, or a JSON array;
+ * ARGS_STEP is on_step's int, on a fast path of its own (esmod_call_step). */
+typedef enum { ARGS_INT, ARGS_STR, ARGS_JSON, ARGS_STEP } ArgsShape;
 
 /* The most bytes of a mod's path (Dado's limit for a script loaded by its path). */
 #define MAX_PATH_BYTES 1000
@@ -74,9 +89,16 @@ typedef struct Mod {
 	/* The mod's file without ".js", as the harness loads it. */
 	char *path;
 	int slot;
-	unsigned hooks;
+	/* Whether it has each hook, by hook id (HookId): 1, 0, or -1 not asked yet. */
+	signed char *has;
+	int hasCount;
 	int live;
 } Mod;
+
+/* Hook names, interned: a hook's id is its index here. The known hooks come
+ * first, in their order. */
+static char **hookNames;
+static int hookNameCount;
 
 static Mod *mods;
 static int modCount;
@@ -346,10 +368,51 @@ static int WdDisarm(void)
 
 /* ---- Running hooks ---- */
 
-/* Hooks that are switched off for a mod when they fail once. */
-static int OffOnFailure(int hook)
+/* The id of a hook name (HookId), interning it the first time. -1 when out of memory. */
+static int HookId(const char *name)
 {
-	return hook == H_STEP || hook == H_DAY || hook == H_ENTER || hook == H_CAN_OUTFITTER;
+	for(int i = 0; i < hookNameCount; ++i)
+		if(!strcmp(hookNames[i], name))
+			return i;
+	char **grown = realloc(hookNames, (size_t)(hookNameCount + 1) * sizeof(char *));
+	if(!grown)
+		return -1;
+	hookNames = grown;
+	char *copy = Copy(name);
+	if(!copy)
+		return -1;
+	hookNames[hookNameCount] = copy;
+	return hookNameCount++;
+}
+
+/* Hooks that are switched off for a mod when they fail once. */
+static int OffOnFailure(const char *hook)
+{
+	return !strcmp(hook, "on_step") || !strcmp(hook, "on_day") || !strcmp(hook, "on_enter")
+		|| !strcmp(hook, "can_outfitter");
+}
+
+/* Whether a mod has a hook, by id: 1, 0, or -1 when it has not been asked. */
+static int Has(const Mod *mod, int id)
+{
+	return id >= 0 && id < mod->hasCount ? mod->has[id] : -1;
+}
+
+static void SetHas(Mod *mod, int id, int has)
+{
+	if(id < 0)
+		return;
+	if(id >= mod->hasCount)
+	{
+		signed char *grown = realloc(mod->has, (size_t)(id + 1));
+		if(!grown)
+			return;
+		for(int i = mod->hasCount; i <= id; ++i)
+			grown[i] = -1;
+		mod->has = grown;
+		mod->hasCount = id + 1;
+	}
+	mod->has[id] = (signed char)has;
 }
 
 static void Drop(Mod *mod)
@@ -357,45 +420,107 @@ static void Drop(Mod *mod)
 	if(mod->live)
 		esmod_drop(mod->slot);
 	mod->live = 0;
-	mod->hooks = 0;
+	for(int i = 0; i < mod->hasCount; ++i)
+		mod->has[i] = 0;
 }
 
-/* Run one hook of one mod: its answer, -1 when it failed, -2 when the
- * watchdog stopped it (the mod is then off), -3 when it did not run. */
-static int RunHook(Mod *mod, int hook, const char *text, int32_t a, int32_t b)
+/* Run one hook of one mod, by its id, with its arguments in `shape`: `a`,
+ * `text`, or `text` as a JSON array. Its answer, -1 when it failed, -2 when
+ * the watchdog stopped it (the mod is then off), -3 when it did not run (the
+ * mod has no such hook, or is off). */
+static int RunHook(Mod *mod, int id, ArgsShape shape, const char *text, int32_t a)
 {
-	if(!mod->live || !(mod->hooks & BIT(hook)))
+	if(!mod->live || id < 0 || !Has(mod, id))
 		return -3;
+	const char *hook = hookNames[id];
 	if(inHook)
 	{
-		Say("dado: mod \"%s\": %s was asked for from inside another hook and did not run", mod->name, HOOK_NAMES[hook]);
+		Say("dado: mod \"%s\": %s was asked for from inside another hook and did not run", mod->name, hook);
 		return -3;
 	}
+	const int mode = id == 0 ? 2 : OffOnFailure(hook) ? 1 : 0;
 	inHook = 1;
-	game->hook_timing(mod->name, HOOK_NAMES[hook], 1);
+	game->hook_timing(mod->name, hook, 1);
 	WdArm(mod->slot, hookLimit);
-	int result = esmod_call(mod->slot, hook, text ? text : "", a, b);
+	/* A hook not asked about yet is asked now, in the same armed call. */
+	int result = Has(mod, id) < 0 ? esmod_has(mod->slot, id, hook) : 1;
+	if(result == 0)
+		result = -4;
+	else if(result == 1)
+	{
+		if(shape == ARGS_STEP)
+			result = esmod_call_step(mod->slot, a, mode);
+		else if(shape == ARGS_INT)
+			result = esmod_call_int(mod->slot, id, a, mode);
+		else if(shape == ARGS_STR)
+			result = esmod_call_str(mod->slot, id, text ? text : "", mode);
+		else
+			result = esmod_call(mod->slot, id, text ? text : "[]", mode);
+	}
 	int fired = WdDisarm();
-	game->hook_timing(mod->name, HOOK_NAMES[hook], 0);
+	game->hook_timing(mod->name, hook, 0);
 	inHook = 0;
 	if(fired || result == -2)
 	{
 		if(fired)
 			Say("dado: mod \"%s\" ran longer than %d ms in %s and was stopped; the mod is now off",
-				mod->name, hookLimit, HOOK_NAMES[hook]);
+				mod->name, hookLimit, hook);
 		else
-			Say("dado: mod \"%s\" was stopped in %s; the mod is now off", mod->name, HOOK_NAMES[hook]);
+			Say("dado: mod \"%s\" was stopped in %s; the mod is now off", mod->name, hook);
 		Drop(mod);
 		return -2;
 	}
-	if(result == -1 && OffOnFailure(hook))
+	if(result == -4)
 	{
-		mod->hooks &= ~BIT(hook);
+		/* Asked on its first call: the mod has no such hook. */
+		SetHas(mod, id, 0);
+		return -3;
+	}
+	SetHas(mod, id, 1);
+	if(result == -1 && mode == 1)
+	{
+		SetHas(mod, id, 0);
 		/* A mod whose can_outfitter fails has its outfitter button disabled. */
-		if(hook == H_CAN_OUTFITTER)
-			mod->hooks &= ~BIT(H_OUTFITTER);
+		if(!strcmp(hook, "can_outfitter"))
+			SetHas(mod, HookId("on_outfitter"), 0);
 	}
 	return result;
+}
+
+/* A JSON array of strings, ["a","b",...], in memory the caller frees; NULL
+ * when out of memory. */
+static char *JsonStrings(int count, const char *const *items)
+{
+	size_t size = 3;
+	for(int i = 0; i < count; ++i)
+		size += 6 * strlen(items[i] ? items[i] : "") + 3;
+	char *out = malloc(size);
+	if(!out)
+		return NULL;
+	char *w = out;
+	*w++ = '[';
+	for(int i = 0; i < count; ++i)
+	{
+		if(i)
+			*w++ = ',';
+		*w++ = '"';
+		for(const unsigned char *c = (const unsigned char *)(items[i] ? items[i] : ""); *c; ++c)
+		{
+			if(*c == '"' || *c == '\\')
+			{
+				*w++ = '\\';
+				*w++ = (char)*c;
+			}
+			else if(*c < 0x20)
+				w += snprintf(w, 7, "\\u%04x", *c);
+			else
+				*w++ = (char)*c;
+		}
+		*w++ = '"';
+	}
+	*w++ = ']';
+	*w = '\0';
+	return out;
 }
 
 static Mod *FindMod(const char *name)
@@ -583,20 +708,29 @@ static void LoadOne(const Found *found)
 	/* Loading runs the mod's code (its module's top level, api_version, any
 	 * getter or Proxy trap behind the hook check), so it is one armed call,
 	 * bracketed as the mod's "load". */
+	signed char has[KNOWN_COUNT];
 	inHook = 1;
 	game->hook_timing(found->name, "load", 1);
 	WdArm(slot, loadLimit);
-	int hooks = esmod_prepare(slot, found->path, found->name);
+	int loaded = esmod_prepare(slot, found->path, found->name);
+	/* Which of the known hooks it has, in the same armed call. */
+	for(int i = 0; i < KNOWN_COUNT; ++i)
+	{
+		int answer = loaded == 0 ? esmod_has(slot, i, KNOWN_HOOKS[i]) : 0;
+		if(answer == -2)
+			loaded = -2;
+		has[i] = (signed char)(answer == 1);
+	}
 	int fired = WdDisarm();
 	game->hook_timing(found->name, "load", 0);
 	inHook = 0;
-	if(fired || hooks == -2)
+	if(fired || loaded == -2)
 	{
 		Say("dado: mod \"%s\" took longer than %d ms to load and was stopped", found->name, loadLimit);
 		esmod_drop(slot);
 		return;
 	}
-	if(hooks < 0)
+	if(loaded < 0)
 	{
 		esmod_drop(slot);
 		return;
@@ -612,25 +746,31 @@ static void LoadOne(const Found *found)
 	mod->name = Copy(found->name);
 	mod->path = Copy(found->path);
 	mod->slot = slot;
-	mod->hooks = (unsigned)hooks;
+	mod->has = NULL;
+	mod->hasCount = 0;
 	mod->live = 1;
-	if(!mod->name || !mod->path)
+	/* The known hooks' ids are their indices (interned first, by es_loader_init). */
+	for(int i = KNOWN_COUNT - 1; i >= 0; --i)
+		SetHas(mod, i, has[i]);
+	if(!mod->name || !mod->path || mod->hasCount != KNOWN_COUNT)
 	{
 		free(mod->name);
 		free(mod->path);
+		free(mod->has);
 		esmod_drop(slot);
 		return;
 	}
 	++modCount;
-	if(mod->hooks & BIT(H_LOAD))
+	if(Has(mod, 0) == 1)
 	{
-		int result = RunHook(mod, H_LOAD, "", 0, 0);
-		if(result < 0)
+		int result = RunHook(mod, 0, ARGS_JSON, "[]", 0);
+		if(result < 0 && result != -3)
 		{
 			/* RunHook said why; a mod whose on_load fails is not loaded. */
 			Drop(mod);
 			free(mod->name);
 			free(mod->path);
+			free(mod->has);
 			--modCount;
 			return;
 		}
@@ -676,36 +816,44 @@ static int32_t ES_CALL Count(void)
 	return live;
 }
 
+/* Every mod's hook, with one int (or none, for "[]" in ARGS_JSON). */
+static void EachMod(const char *hook, ArgsShape shape, const char *text, int32_t a)
+{
+	const int id = HookId(hook);
+	for(int i = 0; i < modCount; ++i)
+		RunHook(&mods[i], id, shape, text, a);
+}
+
+/* One mod's hook, by the mod's name: its answer, or -3 when it did not run. */
+static int OneMod(const char *name, const char *hook, ArgsShape shape, const char *text, int32_t a)
+{
+	Mod *mod = FindMod(name);
+	return mod ? RunHook(mod, HookId(hook), shape, text, a) : -3;
+}
+
 static void ES_CALL Step(int32_t step)
 {
-	for(int i = 0; i < modCount; ++i)
-		RunHook(&mods[i], H_STEP, "", step, 0);
+	EachMod("on_step", ARGS_STEP, NULL, step);
 }
 
 static void ES_CALL Day(int32_t day)
 {
-	for(int i = 0; i < modCount; ++i)
-		RunHook(&mods[i], H_DAY, "", day, 0);
+	EachMod("on_day", ARGS_INT, NULL, day);
 }
 
 static void ES_CALL Enter(const char *system)
 {
-	for(int i = 0; i < modCount; ++i)
-		RunHook(&mods[i], H_ENTER, system, 0, 0);
+	EachMod("on_enter", ARGS_STR, system, 0);
 }
 
 static void ES_CALL PlanetButton(const char *name)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_PLANET_BUTTON, "", 0, 0);
+	OneMod(name, "on_planet_button", ARGS_JSON, "[]", 0);
 }
 
 static void ES_CALL Panel(const char *name, int32_t button)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_PANEL, "", button, 0);
+	OneMod(name, "on_panel", ARGS_INT, NULL, button);
 }
 
 static int32_t ES_CALL CanOutfitter(const char *name, const char *outfit)
@@ -714,44 +862,57 @@ static int32_t ES_CALL CanOutfitter(const char *name, const char *outfit)
 	if(!mod)
 		return 0;
 	/* A mod with no can_outfitter has its button enabled when it has on_outfitter. */
-	if(!(mod->hooks & BIT(H_CAN_OUTFITTER)))
-		return (mod->hooks & BIT(H_OUTFITTER)) ? 1 : 0;
-	return RunHook(mod, H_CAN_OUTFITTER, outfit, 0, 0) == 1;
+	if(Has(mod, HookId("can_outfitter")) != 1)
+		return Has(mod, HookId("on_outfitter")) == 1 ? 1 : 0;
+	return RunHook(mod, HookId("can_outfitter"), ARGS_STR, outfit, 0) == 1;
 }
 
 static void ES_CALL Outfitter(const char *name, const char *outfit)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_OUTFITTER, outfit, 0, 0);
+	OneMod(name, "on_outfitter", ARGS_STR, outfit, 0);
 }
 
 static void ES_CALL Confirm(const char *name, int32_t token)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_CONFIRM, "", token, 0);
+	OneMod(name, "on_confirm", ARGS_INT, NULL, token);
 }
 
 static void ES_CALL PanelRow(const char *name, int32_t row)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_PANEL_ROW, "", row, 0);
+	OneMod(name, "on_panel_row", ARGS_INT, NULL, row);
 }
 
 static void ES_CALL PanelHeader(const char *name, int32_t column)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_PANEL_HEADER, "", column, 0);
+	OneMod(name, "on_panel_header", ARGS_INT, NULL, column);
 }
 
 static void ES_CALL Number(const char *name, int32_t token, int32_t value)
 {
-	Mod *mod = FindMod(name);
-	if(mod)
-		RunHook(mod, H_NUMBER, "", token, value);
+	char args[48];
+	snprintf(args, sizeof(args), "[%ld,%ld]", (long)token, (long)value);
+	OneMod(name, "on_number", ARGS_JSON, args, 0);
+}
+
+/* Mod API 10. */
+static void ES_CALL Save(void)
+{
+	EachMod("on_save", ARGS_JSON, "[]", 0);
+}
+
+static void ES_CALL PilotLoaded(void)
+{
+	EachMod("on_pilot_loaded", ARGS_JSON, "[]", 0);
+}
+
+static void ES_CALL Notification(const char *name, const char *note, const char *payload, const char *sender)
+{
+	const char *items[3] = {note, payload, sender};
+	char *args = JsonStrings(3, items);
+	if(!args)
+		return;
+	OneMod(name, "on_notification", ARGS_JSON, args, 0);
+	free(args);
 }
 
 static void ES_CALL Shutdown(void)
@@ -761,10 +922,16 @@ static void ES_CALL Shutdown(void)
 	{
 		free(mods[i].name);
 		free(mods[i].path);
+		free(mods[i].has);
 	}
 	free(mods);
 	mods = NULL;
 	modCount = 0;
+	for(int i = 0; i < hookNameCount; ++i)
+		free(hookNames[i]);
+	free(hookNames);
+	hookNames = NULL;
+	hookNameCount = 0;
 	esmod_shutdown();
 }
 
@@ -772,7 +939,9 @@ ES_LOADER_EXPORT int32_t ES_CALL es_loader_init(const EsHost *host, EsLoader *lo
 {
 	if(!host || !loader)
 		return 1;
-	if(host->size < offsetof(EsHost, version) + sizeof(host->version) || host->version < ES_API_VERSION)
+	/* An older game than ESDADO_MIN_HOST_API is declined; newer calls are optional
+	 * (the generated shim answers 0 or "" for those an older game lacks). */
+	if(host->size < offsetof(EsHost, version) + sizeof(host->version) || host->version < ESDADO_MIN_HOST_API)
 		return 2;
 	const char *missing = es_shim_missing(host);
 	if(missing)
@@ -790,6 +959,11 @@ ES_LOADER_EXPORT int32_t ES_CALL es_loader_init(const EsHost *host, EsLoader *lo
 		return 4;
 	if(esmod_init() != 0)
 		return 5;
+	/* The known hooks' ids are their indices. */
+	if(!hookNameCount)
+		for(int i = 0; i < KNOWN_COUNT; ++i)
+			if(HookId(KNOWN_HOOKS[i]) != i)
+				return 6;
 	game = host;
 	hookLimit = ReadLimit("ES_DADO_HOOK_MS", hookLimit);
 	loadLimit = ReadLimit("ES_DADO_LOAD_MS", loadLimit);
@@ -813,6 +987,9 @@ ES_LOADER_EXPORT int32_t ES_CALL es_loader_init(const EsHost *host, EsLoader *lo
 	mine.panel_header = PanelHeader;
 	mine.number = Number;
 	mine.shutdown = Shutdown;
+	mine.save = Save;
+	mine.pilot_loaded = PilotLoaded;
+	mine.notification = Notification;
 	/* Write no more than the game reserved. */
 	memcpy(loader, &mine, mine.size);
 	return 0;

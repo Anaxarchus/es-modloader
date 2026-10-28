@@ -9,7 +9,7 @@
 # DADOC_EXECUTABLE), a C compiler, and git for the first build of the script
 # engine (QuickJS-ng with Dado's patches, cached in ~/.cache/dado-quickjs).
 cmake_minimum_required(VERSION 3.21)
-project(esdado VERSION 0.1.0 LANGUAGES C)
+project(esdado VERSION 0.2.0 LANGUAGES C)
 
 include(CTest)
 
@@ -84,6 +84,10 @@ endif()
 message(STATUS "esdado: script engine in ${DADO_QJS_DIR}")
 
 set(GEN "${CMAKE_CURRENT_BINARY_DIR}/gen")
+# The oldest game (its mod API) the loader runs on. Host calls of later APIs are
+# optional: the generated shim answers 0 or "" for them on an older game, and the
+# harness checks them with es_has_<field>().
+set(ESDADO_MIN_HOST_API 9)
 file(MAKE_DIRECTORY "${GEN}")
 
 # The harness, transpiled to one C file and its header, with the max-align fix.
@@ -103,7 +107,7 @@ add_custom_command(
 add_custom_command(
 	OUTPUT "${GEN}/es_host.h" "${GEN}/es_host_shim.c"
 	COMMAND ${CMAKE_COMMAND} -DAPI=${CMAKE_CURRENT_SOURCE_DIR}/include/es_api.h -DOUT=${GEN}
-		-P "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-host-shim.cmake"
+		-DMIN_API=${ESDADO_MIN_HOST_API} -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-host-shim.cmake"
 	DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/include/es_api.h" "${CMAKE_CURRENT_SOURCE_DIR}/tools/gen-host-shim.cmake"
 	COMMENT "esdado: generating the host shim from es_api.h"
 	VERBATIM)
@@ -128,7 +132,7 @@ if(NOT LOADER_VERSION MATCHES "^[0-9A-Za-z.+-]+$")
 	message(FATAL_ERROR "LOADER_VERSION \"${LOADER_VERSION}\" may hold only letters, digits, '.', '+' and '-'")
 endif()
 message(STATUS "esdado: loader version ${LOADER_VERSION}")
-target_compile_definitions(esdado PRIVATE _GNU_SOURCE "ESDADO_VERSION=\"${LOADER_VERSION}\"")
+target_compile_definitions(esdado PRIVATE _GNU_SOURCE "ESDADO_VERSION=\"${LOADER_VERSION}\"" "ESDADO_MIN_HOST_API=${ESDADO_MIN_HOST_API}")
 target_include_directories(esdado PRIVATE include "${GEN}" "${DADO_QJS_DIR}")
 # Generated code: warnings are not for it.
 set_source_files_properties("${GEN}/esmod.c" PROPERTIES COMPILE_OPTIONS "-funsigned-char;-w")

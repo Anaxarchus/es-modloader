@@ -1,0 +1,120 @@
+class Api10Probe extends es.Mod
+
+// A test mod for mod API 10: trade prices, cargo, parking and removing ships,
+// outfitter stock, the notification bus (with api10_pong), Game.has, timing
+// sections, the fractions, and the hooks on_save and on_pilot_loaded. It
+// records what it saw in conditions named "test: api10 ...", which
+// tests/fake_host.cpp checks, and does nothing unless "test: api10" (or, on an
+// API 9 game, "test: api10 old") is set.
+
+import "imports:sdk/es"
+
+string name():
+    return "api10 probe"
+
+void record(es.Game game, string key, int value):
+    game.set_condition("test: api10 " + key, value)
+
+void on_load(es.Game game):
+    game.listen("test10.*")
+
+void on_pilot_loaded(es.Game game):
+    record(game, "pilot loaded", game.condition("test: api10 pilot loaded") + 1)
+
+void on_save(es.Game game):
+    if game.condition("test: api10") == 0:
+        return
+    game.set_data("saved", "yes")
+    record(game, "saves", game.condition("test: api10 saves") + 1)
+    // Delivered after the save, not during it.
+    game.notify("test10.ping", "after save")
+
+void on_enter(es.Game game, string system):
+    if game.condition("test: api10") == 0 || game.planet() == "":
+        return
+    game.timing_section("trade")
+    record(game, "price Alpha Food", game.trade_price("Alpha", "Food"))
+    record(game, "base Alpha Food", game.trade_base_price("Alpha", "Food"))
+    record(game, "price Delta Metal", game.trade_price("Delta", "Metal"))
+    record(game, "price unknown", game.trade_price("Nowhere", "Food") + game.trade_price("Alpha", "Gold") + game.trade_base_price("Nowhere", "Food"))
+    int n = game.commodity_count()
+    string list = ""
+    for k in 0 ..< n:
+        if k > 0:
+            list = list + ","
+        list = list + game.commodity_name(k)
+    record(game, "commodities " + string(n) + " " + list, 1)
+    record(game, "commodity bad", 1 if game.commodity_name(n) == "" && game.commodity_name(-1) == "" else 0)
+    record(game, "cargo Food", game.cargo("Food"))
+    record(game, "cargo Nope", game.cargo("Nope"))
+    game.timing_section("stock")
+    game.outfit_stock_on(true)
+    game.set_outfit_stock("Alpha I", "Laser", 4)
+    record(game, "outfit stock set", game.outfit_stock("Alpha I", "Laser"))
+    game.set_outfit_stock("Alpha I", "Laser", -5)
+    record(game, "outfit stock untracked", game.outfit_stock("Alpha I", "Laser"))
+    game.set_outfit_stock("Nowhere", "Laser", 3)
+    game.set_outfit_stock("Alpha I", "Nope", 3)
+    record(game, "outfit stock unknown", game.outfit_stock("Nowhere", "Laser") + game.outfit_stock("Alpha I", "Nope"))
+    game.set_outfit_stock("Alpha I", "Battery", 2)
+    game.timing_section("")
+    record(game, "park in enter", 1 if game.ship_park("uuid-b", true) else 0)
+    record(game, "has notify", 1 if game.has("notify") else 0)
+    record(game, "has nope", 1 if game.has("nope") else 0)
+
+void on_planet_button(es.Game game):
+    if game.condition("test: api10 old") != 0:
+        // An API 9 game: every API 10 call answers its "nothing".
+        record(game, "old price", game.trade_price("Alpha", "Food"))
+        record(game, "old base", game.trade_base_price("Alpha", "Food"))
+        record(game, "old commodities", game.commodity_count())
+        record(game, "old name", 1 if game.commodity_name(0) == "" else 0)
+        record(game, "old outfit stock", game.outfit_stock("Alpha I", "Laser"))
+        game.outfit_stock_on(true)
+        game.set_outfit_stock("Alpha I", "Laser", 3)
+        record(game, "old park", 1 if game.ship_park("uuid-b", true) else 0)
+        record(game, "old remove", 1 if game.ship_remove("uuid-b") else 0)
+        record(game, "old parked", 1 if game.ship_parked("uuid-b") else 0)
+        record(game, "old cargo", game.cargo("Food"))
+        game.listen("x.*")
+        game.unlisten("x.*")
+        game.timing_section("x")
+        record(game, "old notify", 1 if game.notify("x.y", "") else 0)
+        record(game, "old has", 1 if game.has("notify") else 0)
+        record(game, "old done", 1)
+        return
+    if game.condition("test: api10") == 0:
+        return
+    record(game, "park b", 1 if game.ship_park("uuid-b", true) else 0)
+    record(game, "parked b", 1 if game.ship_parked("uuid-b") else 0)
+    record(game, "park flagship", 1 if game.ship_park("uuid-a", true) else 0)
+    record(game, "unpark b", 1 if game.ship_park("uuid-b", false) && !game.ship_parked("uuid-b") else 0)
+    record(game, "remove c", 1 if game.ship_remove("uuid-c") else 0)
+    record(game, "remove unknown", 1 if game.ship_remove("uuid-z") else 0)
+    record(game, "notify ping", 1 if game.notify("test10.ping", "reply") else 0)
+
+void on_panel(es.Game game, int button):
+    if game.condition("test: api10") == 0:
+        return
+    if button == 1:
+        game.notify("test10.ping", "loop")
+    else if button == 2:
+        int accepted = 0
+        for k in 0 ..< 300:
+            if game.notify("test10.flood", string(k)):
+                accepted = accepted + 1
+        record(game, "flood accepted", accepted)
+    else if button == 3:
+        record(game, "bad name", 1 if game.notify("bad name!", "") else 0)
+
+void on_notification(es.Game game, string name, string payload, string sender):
+    record(game, "got " + name + "|" + payload + "|" + sender, 1)
+    record(game, "notes", game.condition("test: api10 notes") + 1)
+    if name == "test10.pong" && payload == "loop":
+        game.notify("test10.ping", "loop")
+
+void on_step(es.Game game, int step):
+    if game.condition("test: api10") == 0:
+        return
+    record(game, "energy fraction", int(game.energy_fraction(0) * 100.0))
+    record(game, "fuel fraction", int(game.fuel_fraction(0) * 100.0))

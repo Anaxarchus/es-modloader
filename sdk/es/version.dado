@@ -23,6 +23,14 @@
 //      model_category, model_licenses), buy_ship, the ships destroyed each
 //      step (losses, loss_model, loss_government, loss_by_player), and
 //      map_label and map_ring.
+//  10: trade prices (Game.trade_price, trade_base_price, commodity_count,
+//      commodity_name) and cargo, the player's ships parked or removed
+//      (ship_park, ship_parked, ship_remove), outfitter stock
+//      (outfit_stock_on, outfit_stock, set_outfit_stock), the notification bus
+//      (notify, listen, unlisten; on_notification), capability discovery
+//      (Game.has), timing sections (timing_section), energy_fraction and
+//      fuel_fraction; the hooks on_save and on_pilot_loaded; and Mod.min_api,
+//      the API a mod needs, which loaders check instead of api_version.
 package es
 
-const i64 MOD_API = 9
+const i64 MOD_API = 10

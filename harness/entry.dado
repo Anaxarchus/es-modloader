@@ -45,24 +45,56 @@ private bool live(i32 slot):
     return slot >= 0 && slot < slots && used[slot]
 
 // Load the mod at `<path>.js` into a new slot's engine, naming it `name` in
-// messages. Answers the hooks it has (Harness.hooks: one bit each, 0 or more)
-// when it loaded, -1 when it was refused or failed, -2 when it was stopped
-// (the watchdog).
+// messages. Answers 0 when it loaded, -1 when it was refused or failed, -2
+// when it was stopped (the watchdog).
 export i32 esmod_prepare(i32 slot, cstring path, cstring name):
     if !live(slot):
         return -1
     try i64 r = harnesses[slot].prepare(string8(path), string8(name)) else code:
         return -2 if code == script.STOPPED else -1
-    if r < 0:
-        return -1
+    return 0 if r >= 0 else -1
+
+// Give the hook named `hook` the id `id` in the slot's engine, and answer
+// whether the slot's mod has it (Harness.has): 1 or 0, or -2 when the watchdog
+// stopped it (a getter or Proxy trap behind the name). Hooks are then run by id.
+export i32 esmod_has(i32 slot, i32 id, cstring hook):
+    if !live(slot):
+        return 0
+    try i64 r = harnesses[slot].has(id, string8(hook)) else code:
+        return -2 if code == script.STOPPED else 0
     return i32(r)
 
-// Run hook `hook` of the slot's mod (Harness.call): its answer, -1 when the
-// hook failed, or -2 when the watchdog stopped it.
-export i32 esmod_call(i32 slot, i32 hook, cstring text, i32 a, i32 b):
+// Run hook `id` of the slot's mod (Harness.call_*): with one int, one string,
+// or the arguments a JSON array holds. Each answers what the hook answered (1
+// or 0), -4 when the mod has no such hook, -1 when it failed (reported as
+// `mode` says), or -2 when the watchdog stopped it.
+export i32 esmod_call_int(i32 slot, i32 id, i32 a, i32 mode):
     if !live(slot):
         return -1
-    try i64 r = harnesses[slot].call(hook, string8(text), a, b) else code:
+    try i64 r = harnesses[slot].call_int(id, a, mode) else code:
+        return -2 if code == script.STOPPED else -1
+    return i32(r)
+
+// on_step, called straight (Harness.call_step): the fast path for the hook
+// every mod runs every engine step. Answers 0, -1 or -2 as esmod_call_int.
+export i32 esmod_call_step(i32 slot, i32 a, i32 mode):
+    if !live(slot):
+        return -1
+    try i64 r = harnesses[slot].call_step(a, mode) else code:
+        return -2 if code == script.STOPPED else -1
+    return i32(r)
+
+export i32 esmod_call_str(i32 slot, i32 id, cstring s, i32 mode):
+    if !live(slot):
+        return -1
+    try i64 r = harnesses[slot].call_str(id, string8(s), mode) else code:
+        return -2 if code == script.STOPPED else -1
+    return i32(r)
+
+export i32 esmod_call(i32 slot, i32 id, cstring args, i32 mode):
+    if !live(slot):
+        return -1
+    try i64 r = harnesses[slot].call_json(id, string8(args), mode) else code:
         return -2 if code == script.STOPPED else -1
     return i32(r)
 

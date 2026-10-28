@@ -210,3 +210,39 @@ class Game:
         fail 70
     int ship_in_stock(string model):
         fail 70
+    int trade_price(string system, string commodity):
+        fail 70
+    int trade_base_price(string system, string commodity):
+        fail 70
+    int commodity_count():
+        fail 70
+    string commodity_name(int k):
+        fail 70
+    bool ship_park(string ship, bool on):
+        fail 70
+    bool ship_remove(string ship):
+        fail 70
+    bool ship_parked(string ship):
+        fail 70
+    void outfit_stock_on(bool on):
+        fail 70
+    int outfit_stock(string planet, string outfit):
+        fail 70
+    void set_outfit_stock(string planet, string outfit, int count):
+        fail 70
+    int cargo(string commodity):
+        fail 70
+    bool notify(string name, string payload):
+        fail 70
+    void listen(string pattern):
+        fail 70
+    void unlisten(string pattern):
+        fail 70
+    bool has(string feature):
+        fail 70
+    void timing_section(string name):
+        fail 70
+    float energy_fraction(int i):
+        fail 70
+    float fuel_fraction(int i):
+        fail 70

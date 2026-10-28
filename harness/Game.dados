@@ -60,11 +60,13 @@ float shields(int i):
 float max_shields(int i):
     return host_ship_max_shields(i)
 
-// Ship i's energy, 0..1 of its capacity.
+// Ship i's energy, as an absolute amount (not a fraction of its capacity; see
+// energy_fraction).
 float energy(int i):
     return host_ship_energy(i)
 
-// Ship i's fuel, 0..1 of its capacity.
+// Ship i's fuel, as an absolute amount (not a fraction of its capacity; see
+// fuel_fraction).
 float fuel(int i):
     return host_ship_fuel(i)
 
@@ -528,3 +530,128 @@ void map_ring(string system, float scale, float r, float g, float b):
 // it sells again until they take off. 0 when not landed or for an unknown model.
 int ship_in_stock(string model):
     return host_ship_in_stock(model)
+
+// (Mod API 10.) The current price of a commodity in a system, by their true
+// names: what the trading panel charges there now. 0 when the system has no
+// market for it; -1 for an unknown system or commodity (and on an older game).
+int trade_price(string system, string commodity):
+    return host_trade_price(system, commodity)
+
+// (Mod API 10.) The price the system's data sets for a commodity, before supply
+// and demand move it. Events that change a system's trade change it too: the
+// game keeps no price from before the events. 0 when the system has no market
+// for it; -1 for an unknown system or commodity (and on an older game).
+int trade_base_price(string system, string commodity):
+    return host_trade_base_price(system, commodity)
+
+// (Mod API 10.) How many standard commodities there are (0 on an older game).
+int commodity_count():
+    return host_commodity_count()
+
+// (Mod API 10.) The k-th standard commodity's name, 0 ..< commodity_count(),
+// in the order the trading panel lists them; "" out of range.
+string commodity_name(int k):
+    return host_commodity_name(k)
+
+// (Mod API 10.) Park (`on` true) or unpark one of the player's ships, by UUID
+// (fleet_ship), as the player's own park buttons do, wherever the ship is. The
+// flagship and disabled ships cannot be parked. Answers true when the ship is
+// now as asked. Only from a hook the player started (on_planet_button,
+// on_panel, on_panel_row, on_panel_header, on_confirm, on_number; not the
+// outfitter's) while landed; false elsewhere, for an unknown ship, and on an
+// older game.
+bool ship_park(string ship, bool on):
+    return host_ship_park(ship, on)
+
+// (Mod API 10.) Take one of the player's ships out of the fleet for good, by
+// UUID, with everything on it and in its hold, for no money (as disowning it
+// does): for a ship sold to a company, say. A ship carrying a mission's cargo
+// or passengers is refused. The flagship goes only when another ship landed
+// with the player can take its place. Only from a hook the player
+// started while landed, and not from the outfitter's hooks (on_outfitter, and
+// on_confirm for a dialog opened there). Answers true when it was removed.
+bool ship_remove(string ship):
+    return host_ship_remove(ship)
+
+// (Mod API 10.) Whether one of the player's ships, by UUID, is parked.
+bool ship_parked(string ship):
+    return host_ship_parked(ship)
+
+// (Mod API 10.) Switch outfitter stock on or off for this session, as
+// ship_stock_on does for shipyards: each outfitter then shows the count of the
+// outfits it sells that a mod tracks there, and sells no more than that (after
+// any the player sold there, which it sells back first); untracked outfits stay
+// unlimited. Not saved, and loading a pilot turns it off: call it from
+// on_pilot_loaded (or on_enter, which also works on an older game). Maps and
+// licenses are never tracked.
+void outfit_stock_on(bool on):
+    host_outfit_stock_on(on)
+
+// (Mod API 10.) An outfit's count at a planet, by true names; -1 when untracked
+// (unlimited), for an unknown name, and on an older game. Saved with the pilot.
+int outfit_stock(string planet, string outfit):
+    return host_outfit_stock(planet, outfit)
+
+// (Mod API 10.) Set an outfit's count at a planet; a negative count untracks it
+// (maps and licenses are not tracked).
+// The outfitter lowers it for each one it sells (after those the player sold
+// there). Outfits the player sells there are bought back first until takeoff,
+// as always, and do not raise it.
+void set_outfit_stock(string planet, string outfit, int count):
+    host_set_outfit_stock(planet, outfit, count)
+
+// (Mod API 10.) How many tons of a commodity (or other cargo, by name) the
+// player carries: pooled while landed, and in the holds of their ships in the
+// player's system that are not parked. 0 for none or an unknown name.
+int cargo(string commodity):
+    return host_cargo(commodity)
+
+// (Mod API 10.) Post a notification to the other mods, under any loader, that
+// listen for `name` (1 to 128 bytes of letters, digits and . _ : / -, e.g.
+// "diplomacy.war_declared"). `payload` is text of up to 64 KiB the game does
+// not read (JSON, by convention). It is queued, and delivered later to each
+// listener's on_notification, never to this mod itself: after the step's
+// hooks, after a hook the player started, after landing, after
+// on_pilot_loaded, and once all mods have loaded; what is posted in on_save is
+// delivered after the save. The game names the sender. Answers false when the
+// name or payload is refused, or it was dropped (the queue holds 1024, and a
+// mod may post 256 between deliveries, and 4 MiB wait at most); false on an
+// older game.
+bool notify(string name, string payload):
+    return host_notify(name, payload)
+
+// (Mod API 10.) Receive the notifications named `pattern` in on_notification: an
+// exact name, or a prefix ending in "*" ("diplomacy.*"; "*" for all). It lasts
+// until unlisten or the end of the game, across pilots: listen in on_load.
+void listen(string pattern):
+    host_listen(pattern)
+
+// (Mod API 10.) Stop listening for a pattern, given exactly as to listen.
+void unlisten(string pattern):
+    host_unlisten(pattern)
+
+// (Mod API 10.) Whether the game offers a feature, by name: "call:<name>" for a
+// call of the game's C API added since API 9 ("call:ship_park"), "on_<hook>"
+// for a hook it runs since API 9 ("on_save", "on_notification"), and features
+// such as "notify", "trade_price", "outfit_stock", "ship_parking". Mods that
+// use a newer feature check it here, so they still run on an older game. False
+// for everything on an API 9 game.
+bool has(string feature):
+    return host_api_has(feature)
+
+// (Mod API 10.) Split the time of the hook that is running into named sections,
+// from now until the next section or the end of the hook, for the game's timing
+// report (mod, hook, section); "" goes back to no section. A mod's names past
+// its 32nd are counted as "(other)"; a name with a control character is ignored.
+void timing_section(string name):
+    host_timing_section(name)
+
+// (Mod API 10.) Ship i's energy as a fraction of its capacity, 0..1 (0 for a
+// ship with no battery).
+float energy_fraction(int i):
+    return host_ship_energy_fraction(i)
+
+// (Mod API 10.) Ship i's fuel as a fraction of its capacity, 0..1 (0 for a
+// ship with no fuel tank).
+float fuel_fraction(int i):
+    return host_ship_fuel_fraction(i)

@@ -7,7 +7,77 @@ mod API; read it next. This file is the working log around it. Entries before
 "The split" describe the harness as it was inside the game (`modding/` in the
 game's repository); paths there are the old ones.
 
-Last updated 2026-10-27 (releasing with tools/release.sh).
+Last updated 2026-10-28 (mod API 10, loader 0.2.0).
+
+## Mod API 10 (2026-10-28): loader 0.2.0
+
+Added for the Corporations features and from the API design survey. The game's
+`docs/modding-api.md` ("Mod API 10") has the game side; README.md the mod side.
+
+* **Hooks** `on_save` (the game's new `EsLoader.save`, called first thing in
+  `PlayerInfo::Save(DataWriter &)`, so mod data written there lands in that
+  save), `on_pilot_loaded` (`EsLoader.pilot_loaded`, from `CheckPilot` when
+  `ModState::Generation()` moved on: after `load_mods`, before any
+  day/enter/step for the pilot) and `on_notification` (`EsLoader.notification`).
+* **Calls**: `trade_price`, `trade_base_price` (the engine keeps no pre-event
+  price; the base is recovered from price and supply), `commodity_count`,
+  `commodity_name`, `cargo`, `ship_park`, `ship_remove`, `ship_parked`
+  (player-started hooks only, landed; remove not from the outfitter),
+  `outfit_stock_on`, `outfit_stock`, `set_outfit_stock` (OutfitterPanel
+  enforces it through two `ModState` helpers; 18 upstream lines), the bus
+  (`notify`, `listen`, `unlisten`; the game's `source/modding/ModBus`),
+  `has` (`api_has`, the game's `Features()` registry), `timing_section`,
+  `energy_fraction`, `fuel_fraction`. `energy(i)`/`fuel(i)` were documented as
+  fractions but are absolute; the docs now say so.
+* **Older games.** The loader runs on an API 9 game: `es_loader_init` checks
+  `version >= ESDADO_MIN_HOST_API` (9, a CMake setting), and the generated shim
+  treats every `EsHost` field after the "Mod API 9" heading as optional
+  (`es_has_<field>()`, forwards that answer 0/""). `host.dado` answers -1 for
+  the calls whose "unknown" is -1. It fills `save`, `pilot_loaded` and
+  `notification` only when the game reserved room (it copies `min(size)`).
+  Tested by `fake_host --api9-host`.
+* **Dispatch by name.** `HOOK_NAMES`, the hook bits and `run()`'s numbered
+  chain are gone. `loader.c` interns hook names (`HookId`), remembers per mod
+  whether it has each (asked at load for `KNOWN_HOOKS`, under the load's
+  bracket and watchdog; any other name on its first call, under its own), and
+  calls `esmod_call_int/str` or `esmod_call` (JSON arguments, `JsonStrings`)
+  by id; the harness (`probe.js` `name_hook`, `invoke_*`) runs
+  `mod[name](game, ...)`. Failure wording comes from the C side's `mode`.
+  Measured: the generic int path cost ~10% more per mod and step than the
+  numbered one (540 vs 490 ns), mostly the int conversion of the answer
+  (dropped for the int path) and the extra JS call, so `on_step` has a direct
+  fast path (`esmod_call_step`): 8.3 us per step for 20 mods, against 9.9 us
+  with 0.1.0's numbered dispatch (README, "Performance").
+* **Version gate.** `Mod.min_api()` (default 1): the harness refuses a mod
+  only when `min_api() > MOD_API`. A mod with no `min_api` (built before API
+  10) is checked by `api_version()` as before, so nothing that loaded before
+  is refused now, and a mod rebuilt with a newer SDK runs on this loader
+  unless it says it needs more. `tests/mods/wrong_api` now says min_api 999;
+  `future_sdk` and `sources/Test Mods/scripts/legacy_future.js` cover both
+  sides; the watchdog's `api_spin.js` spins in `min_api` now.
+* **Tests**: `api10_probe`, `api10_pong`, `future_sdk`, `TestApi10` and
+  `--api9-host` in `fake_host.cpp` (whose host has a small bus that follows
+  the game's `ModBus`). The game's `tests/modloader` tests the real bus across
+  two C loaders, an API 9 C loader, and the `Features()` registry.
+
+Review fixes (2026-10-28): the game's bus caps the bytes waiting at 4 MiB
+(counting what a cut-off drain holds back); timing section names are capped
+at 32 a mod (the rest "(other)") and refuse control characters;
+`trade_base_price` reads a new `System::BasePrice` (exact also right after an
+event); `ship_remove` refuses ships with mission cargo or passengers, and
+`ship_park` refuses the outfitter's hooks too; maps and licenses are never
+outfit-stock tracked; the fractions answer 0 with no capacity; the on_save
+docs name the real autosave (a mission marked `autosave`), say an in-flight
+on_save has no ship snapshot and that its notifications are lost on a pilot
+switch or quit. Here: a `min_api()` that is no whole number is logged and
+taken as 1 (`tests/sources/Test Mods/scripts/odd_min_api.js`).
+
+Verified on 2026-10-28 in the VM: `tools/dado-mods.sh test` (main, API 9
+host, both watchdog runs PASSED); the game built with gcc 13 and `-Werror`
+(plain and with `patches/apply.sh apply`), its unit tests, the changed files
+with zig clang for Linux and Windows x64/x86, SDL2/SDL3, with and without
+`NDEBUG`; the SDK's `npm test`, `check` and `typecheck`. Not done: running it
+in the real game (the VM cannot), the macOS dylib.
 
 ## Releasing (2026-10-27)
 
@@ -154,7 +224,7 @@ that ABI the game's own, loader-neutral API.
 | Mod API (the contract) | the game's `source/modding/es_api.h`, copied to `include/es_api.h` here (`tools/sync-api.sh`); `docs/modding-api.md` in the game |
 | Loader C side | `src/loader.c`; the shim generated by `tools/gen-host-shim.cmake` |
 | Harness (Dado) | `harness/`: `entry.dado` (exports, slots), `host.dado` (the `host_*` wrappers), `Game.dados` (the mod API), `harness.dado`, `probe.js` |
-| Mod SDK (Dado side) | `sdk/es/`. `game.dado` is generated (`dado-mods.sh sdk`); `Mod.dados` and `version.dado` (`MOD_API = 9`) are written by hand. |
+| Mod SDK (Dado side) | `sdk/es/`. `game.dado` is generated (`dado-mods.sh sdk`); `Mod.dados` and `version.dado` (`MOD_API = 10`) are written by hand. |
 | Build glue | `CMakeLists.txt`, `build-mac.sh`, `tools/` (`dado-mods.sh`, `fix-max-align.cmake`, `gen-host-shim.cmake`, `install.sh`, `sync-api.sh`, `zig-*.cmake`) |
 | Example mod | `examples/hull_regen` with the plugin in `examples/plugin` (`dado-mods.sh plugin <dir>`) |
 | Tests | `tests/fake_host.cpp`, `tests/mods/*`, `tests/sources/`; the in-game test in `tests/ingame/` |

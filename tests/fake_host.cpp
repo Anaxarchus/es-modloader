@@ -30,13 +30,16 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include <dlfcn.h>
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <filesystem>
 #include <map>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -175,6 +178,8 @@ namespace {
 		string uuid, name, model;
 		std::map<string, int> outfits, integrated;
 		double massSaved = 0.;
+		// API 10.
+		bool parked = false;
 	};
 	std::vector<FleetShip> fleet = {
 		{"uuid-a", "Buggy Barge", "Star Barge", {{"Laser", 2}, {"Gat Ammo", 50}}, {}},
@@ -213,6 +218,32 @@ namespace {
 	};
 	// The planet the player is landed on, while landed.
 	string landedPlanet = "Alpha I";
+
+	// ---- API 10 state ----
+	// Prices by system and commodity: now, and as the data sets it.
+	const vector<string> commodities = {"Food", "Metal"};
+	std::map<std::pair<string, string>, std::pair<int, int>> prices = {
+		{{"Alpha", "Food"}, {100, 110}}, {{"Alpha", "Metal"}, {300, 290}}, {{"Delta", "Food"}, {150, 140}},
+	};
+	std::map<string, int> carried = {{"Food", 12}};
+	bool outfitStockOn = false;
+	std::map<std::pair<string, string>, int> outfitStock;
+	std::vector<string> removedShips;
+	// The bus, as the game keeps it (source/modding/ModBus): a queue drained at
+	// the game's points, each notification to every listener but its sender.
+	struct Note { string name, payload, sender; };
+	std::deque<Note> notes;
+	std::map<string, std::set<string>> listeners;
+	std::map<string, int> postsSinceDrain;
+	size_t lastDrainDeliveries = 0;
+	bool draining = false;
+	const std::set<string> features = {
+		"api_has", "cargo", "notify", "on_notification", "on_pilot_loaded", "on_save", "outfit_stock",
+		"ship_fractions", "ship_parking", "timing_section", "trade_price", "call:ship_park", "call:notify",
+	};
+	// Timing sections, as "mod hook section", and the hook of the open bracket.
+	std::vector<string> sections;
+	string currentHook;
 	struct NumberAsk { string mod, text; int32_t token, most; };
 	std::vector<NumberAsk> numberAsks;
 
@@ -364,6 +395,8 @@ double es_ship_shields(int32_t i) { return Valid(i) ? ships[i].shields : 0.; }
 double es_ship_max_shields(int32_t i) { return Valid(i) ? ships[i].maxShields : 0.; }
 double es_ship_energy(int32_t i) { return Valid(i) ? 100. : 0.; }
 double es_ship_fuel(int32_t i) { return Valid(i) ? 300. : 0.; }
+double es_ship_energy_fraction(int32_t i) { return Valid(i) ? .5 : 0.; }
+double es_ship_fuel_fraction(int32_t i) { return Valid(i) ? .25 : 0.; }
 void es_ship_set_hull(int32_t i, double v) { if(Valid(i)) ships[i].hull = std::clamp(v, 0., ships[i].maxHull); }
 void es_ship_set_shields(int32_t i, double v) { if(Valid(i)) ships[i].shields = std::clamp(v, 0., ships[i].maxShields); }
 int64_t es_condition_get(const char *name) { return conditions[name]; }
@@ -583,6 +616,7 @@ void es_hook_timing(const char *mod, const char *hook, int32_t begin)
 		hookTimingBalanced = hookTimingBalanced && hooksOpen == 0;
 		++hooksOpen;
 		currentMod = mod;
+		currentHook = hook;
 		bracketed = true;
 		hookOrder.push_back(string(mod) + " " + hook);
 		bracketStart[string(mod) + " " + hook] = std::chrono::steady_clock::now();
@@ -861,6 +895,167 @@ int32_t es_ship_in_stock(const char *model)
 }
 
 
+// ---- Mod API 10 ----
+namespace {
+	bool IsCommodity(const char *name) { return std::find(commodities.begin(), commodities.end(), name) != commodities.end(); }
+	bool ValidNoteName(const string &name, bool pattern)
+	{
+		string body = name;
+		if(pattern && !body.empty() && body.back() == '*')
+			body.pop_back();
+		else if(body.empty())
+			return false;
+		if(name.size() > 128)
+			return false;
+		return std::all_of(body.begin(), body.end(), [](char c) {
+			return std::isalnum(static_cast<unsigned char>(c)) || std::strchr("._:/-", c);
+		});
+	}
+	bool Listens(const std::set<string> &patterns, const string &name)
+	{
+		for(const string &p : patterns)
+			if((!p.empty() && p.back() == '*') ? name.compare(0, p.size() - 1, p, 0, p.size() - 1) == 0 : p == name)
+				return true;
+		return false;
+	}
+}
+extern "C" {
+int32_t es_trade_price(const char *system, const char *commodity)
+{
+	if(!inHook || !FindSystem(system) || !IsCommodity(commodity))
+		return -1;
+	auto it = prices.find({system, commodity});
+	return it == prices.end() ? 0 : it->second.first;
+}
+int32_t es_trade_base_price(const char *system, const char *commodity)
+{
+	if(!inHook || !FindSystem(system) || !IsCommodity(commodity))
+		return -1;
+	auto it = prices.find({system, commodity});
+	return it == prices.end() ? 0 : it->second.second;
+}
+int32_t es_commodity_count(void) { return inHook ? static_cast<int32_t>(commodities.size()) : 0; }
+const char *es_commodity_name(int32_t k)
+{
+	return inHook && k >= 0 && k < static_cast<int32_t>(commodities.size()) ? commodities[k].c_str() : "";
+}
+int32_t es_ship_park(const char *mod, const char *uuid, int32_t on)
+{
+	(void)mod;
+	FleetShip *ship = FindFleetShip(uuid);
+	if(!playerAction || flying || !ship || outfitterShips)
+		return 0;
+	// The flagship is the first ship.
+	if(on && ship == &fleet[0])
+		return 0;
+	ship->parked = on != 0;
+	return 1;
+}
+int32_t es_ship_remove(const char *mod, const char *uuid)
+{
+	(void)mod;
+	FleetShip *ship = FindFleetShip(uuid);
+	if(!playerAction || flying || !ship || ship == &fleet[0] || outfitterShips)
+		return 0;
+	removedShips.push_back(ship->uuid);
+	fleet.erase(fleet.begin() + (ship - fleet.data()));
+	return 1;
+}
+int32_t es_ship_parked(const char *uuid) { const FleetShip *ship = FindFleetShip(uuid); return ship && ship->parked; }
+void es_outfit_stock_on(int32_t on) { if(inHook) outfitStockOn = on != 0; }
+int32_t es_outfit_stock(const char *planet, const char *outfit)
+{
+	auto it = outfitStock.find({planet, outfit});
+	return inHook && FindPlanet(planet) && FindOutfit(outfit) && it != outfitStock.end() ? it->second : -1;
+}
+void es_set_outfit_stock(const char *planet, const char *outfit, int32_t count)
+{
+	if(!inHook || !FindPlanet(planet) || !FindOutfit(outfit))
+		return;
+	if(count < 0)
+		outfitStock.erase({planet, outfit});
+	else
+		outfitStock[{planet, outfit}] = count;
+}
+int32_t es_cargo(const char *commodity)
+{
+	auto it = carried.find(commodity);
+	return inHook && it != carried.end() ? it->second : 0;
+}
+int32_t es_notify(const char *mod, const char *name, const char *payload)
+{
+	if(!inHook || !ValidNoteName(name, false) || std::strlen(payload) > 64 * 1024 || notes.size() >= 1024
+			|| postsSinceDrain[mod] >= 256)
+		return 0;
+	++postsSinceDrain[mod];
+	notes.push_back({name, payload, mod});
+	return 1;
+}
+void es_listen(const char *mod, const char *pattern)
+{
+	if(ValidNoteName(pattern, true))
+		listeners[mod].insert(pattern);
+}
+void es_unlisten(const char *mod, const char *pattern) { listeners[mod].erase(pattern); }
+int32_t es_api_has(const char *feature) { return features.count(feature) != 0; }
+const char *es_api_features(void)
+{
+	returned.clear();
+	for(const string &f : features)
+		returned += (returned.empty() ? "" : "\n") + f;
+	return returned.c_str();
+}
+void es_timing_section(const char *mod, const char *name)
+{
+	if(bracketed)
+		sections.push_back(string(mod) + " " + currentHook + " " + name);
+}
+}
+
+// The game drains the bus after the hooks it runs (FakeDrain is called where
+// the game calls ModHarness's DrainNotifications): up to 4 rounds or 1024
+// deliveries, the rest carried to the next drain.
+EsLoader L;
+namespace {
+	void FakeDrain()
+	{
+		if(draining)
+			return;
+		draining = true;
+		lastDrainDeliveries = 0;
+		bool wasInHook = inHook, wasPlayer = playerAction;
+		inHook = true;
+		playerAction = false;
+		for(int round = 0; round < 4 && !notes.empty() && lastDrainDeliveries < 1024; ++round)
+		{
+			std::deque<Note> batch;
+			batch.swap(notes);
+			while(!batch.empty() && lastDrainDeliveries < 1024)
+			{
+				const Note note = batch.front();
+				batch.pop_front();
+				vector<string> receivers;
+				for(const auto &[mod, patterns] : listeners)
+					if(mod != note.sender && Listens(patterns, note.name))
+						receivers.push_back(mod);
+				for(const string &mod : receivers)
+				{
+					++lastDrainDeliveries;
+					if(L.notification)
+						L.notification(mod.c_str(), note.name.c_str(), note.payload.c_str(), note.sender.c_str());
+				}
+			}
+			for(Note &posted : notes)
+				batch.push_back(posted);
+			notes.swap(batch);
+		}
+		postsSinceDrain.clear();
+		inHook = wasInHook;
+		playerAction = wasPlayer;
+		draining = false;
+	}
+}
+
 // The host table the game would give the loader. The calls marked "Mod-scoped"
 // in es_api.h take no mod: they act for the mod of the open hook_timing
 // bracket, and do nothing outside one (counted in `unbracketed`).
@@ -894,6 +1089,12 @@ namespace {
 	int32_t Scoped_buy_ship(const char *model, const char *name) { if(!Scoped()) return 0; return es_buy_ship(currentMod.c_str(), model, name); }
 	void Scoped_map_label(const char *system, const char *text, double r, double g, double b) { if(!Scoped()) return; es_map_label(currentMod.c_str(), system, text, r, g, b); }
 	void Scoped_map_ring(const char *system, double scale, double r, double g, double b) { if(!Scoped()) return; es_map_ring(currentMod.c_str(), system, scale, r, g, b); }
+	int32_t Scoped_ship_park(const char *ship, int32_t on) { if(!Scoped()) return 0; return es_ship_park(currentMod.c_str(), ship, on); }
+	int32_t Scoped_ship_remove(const char *ship) { if(!Scoped()) return 0; return es_ship_remove(currentMod.c_str(), ship); }
+	int32_t Scoped_notify(const char *name, const char *payload) { if(!Scoped()) return 0; return es_notify(currentMod.c_str(), name, payload); }
+	void Scoped_listen(const char *pattern) { if(!Scoped()) return; es_listen(currentMod.c_str(), pattern); }
+	void Scoped_unlisten(const char *pattern) { if(!Scoped()) return; es_unlisten(currentMod.c_str(), pattern); }
+	void Scoped_timing_section(const char *name) { if(!Scoped()) return; es_timing_section(currentMod.c_str(), name); }
 
 	EsHost MakeHost()
 	{
@@ -1004,12 +1205,30 @@ namespace {
 		host.map_label = Scoped_map_label;
 		host.map_ring = Scoped_map_ring;
 		host.ship_in_stock = es_ship_in_stock;
+		host.trade_price = es_trade_price;
+		host.trade_base_price = es_trade_base_price;
+		host.commodity_count = es_commodity_count;
+		host.commodity_name = es_commodity_name;
+		host.ship_park = Scoped_ship_park;
+		host.ship_remove = Scoped_ship_remove;
+		host.ship_parked = es_ship_parked;
+		host.outfit_stock_on = es_outfit_stock_on;
+		host.outfit_stock = es_outfit_stock;
+		host.set_outfit_stock = es_set_outfit_stock;
+		host.cargo = es_cargo;
+		host.notify = Scoped_notify;
+		host.listen = Scoped_listen;
+		host.unlisten = Scoped_unlisten;
+		host.api_has = es_api_has;
+		host.api_features = es_api_features;
+		host.timing_section = Scoped_timing_section;
+		host.ship_energy_fraction = es_ship_energy_fraction;
+		host.ship_fuel_fraction = es_ship_fuel_fraction;
 		return host;
 	}
 }
 
-// The loader's table, filled by es_loader_init.
-EsLoader L;
+// The loader's table (L, above), filled by es_loader_init.
 
 namespace {
 	const char *const PROBE = "api2_probe";
@@ -1028,6 +1247,7 @@ namespace {
 		pending.clear();
 		inHook = true;
 		L.step(step++);
+		FakeDrain();
 		inHook = false;
 		stepLosses.clear();
 	}
@@ -1049,6 +1269,7 @@ namespace {
 		here = system;
 		inHook = true;
 		L.enter(system.c_str());
+		FakeDrain();
 		inHook = false;
 	}
 
@@ -1057,12 +1278,14 @@ namespace {
 	{
 		inHook = playerAction = true;
 		L.planet_button(mod);
+		FakeDrain();
 		inHook = playerAction = false;
 	}
 	void ClickPanel(const char *mod, int32_t button)
 	{
 		inHook = playerAction = true;
 		L.panel(mod, button);
+		FakeDrain();
 		inHook = playerAction = false;
 	}
 
@@ -1362,6 +1585,73 @@ namespace {
 		Check(probe("in stock flying") == 1, "ship_in_stock() answers 0 in flight");
 	}
 
+	// Mod API 10, through tests/mods/api10_probe and api10_pong.
+	void TestApi10()
+	{
+		const char *const P = "api10_probe";
+		auto probe = [](const string &key) { auto it = conditions.find("test: api10 " + key); return it == conditions.end() ? 0 : it->second; };
+		auto pong = [](const string &key) { auto it = conditions.find("test: api10 pong " + key); return it == conditions.end() ? 0 : it->second; };
+		Check(es_trade_price("Alpha", "Food") == -1 && es_commodity_count() == 0 && es_ship_park(P, "uuid-b", 1) == 0
+			&& es_cargo("Food") == 0, "API 10 calls outside a hook answer nothing and change nothing");
+		inHook = true;
+		L.pilot_loaded();
+		FakeDrain();
+		inHook = false;
+		Check(probe("pilot loaded") == 1 && pong("pilot loaded") == 1 && hookCalls["api10_probe on_pilot_loaded"] == 1,
+			"pilot_loaded runs each mod's on_pilot_loaded once, bracketed under its name");
+
+		conditions["test: api10"] = 1;
+		fleet.push_back({"uuid-c", "Spare Barge", "Star Barge", {}, {}});
+		flying = false;
+		landedPlanet = "Alpha I";
+		Enter("Alpha");
+		Check(probe("price Alpha Food") == 100 && probe("base Alpha Food") == 110 && probe("price Delta Metal") == 0
+			&& probe("price unknown") == -3, "trade_price and trade_base_price; 0 for no market, -1 for an unknown system or commodity");
+		Check(probe("commodities 2 Food,Metal") == 1 && probe("commodity bad") == 1, "commodity_count and commodity_name");
+		Check(probe("cargo Food") == 12 && probe("cargo Nope") == 0, "cargo() counts what the player carries");
+		Check(probe("outfit stock set") == 4 && probe("outfit stock untracked") == -1 && probe("outfit stock unknown") == -2
+			&& outfitStockOn && outfitStock.size() == 1 && outfitStock[{"Alpha I", "Battery"}] == 2,
+			"outfit_stock_on, set_outfit_stock and outfit_stock round-trip; a negative count untracks; unknown names answer -1");
+		Check(probe("park in enter") == 0 && !fleet[1].parked, "ship_park() refuses outside a hook the player started");
+		Check(probe("has notify") == 1 && probe("has nope") == 0, "has() asks the game for a feature");
+		auto sectioned = [](const string &entry) { return std::find(sections.begin(), sections.end(), entry) != sections.end(); };
+		Check(sectioned("api10_probe on_enter trade") && sectioned("api10_probe on_enter stock") && sectioned("api10_probe on_enter "),
+			"timing_section() names sections of the running hook, under its mod and hook");
+
+		ClickPlanetButton(P);
+		Check(probe("park b") == 1 && probe("parked b") == 1 && probe("park flagship") == 0 && probe("unpark b") == 1,
+			"ship_park() and ship_parked(); the flagship cannot be parked");
+		Check(probe("remove c") == 1 && probe("remove unknown") == 0 && fleet.size() == 2 && removedShips.size() == 1
+			&& removedShips[0] == "uuid-c", "ship_remove() removes a ship for good; an unknown ship is refused");
+		Check(probe("notify ping") == 1 && pong("got test10.ping|reply|api10_probe") == 1,
+			"notify() posts; the game delivered the ping to the other mod after the hook, with the sender it recorded");
+		Check(probe("got test10.pong|reply|api10_pong") == 1 && probe("got test10.ping|reply|api10_probe") == 0 && probe("notes") == 1,
+			"the answer reached the first mod in the same drain (ping-pong), and the sender never got its own ping");
+		Check(hookCalls["api10_pong on_notification"] == 1 && hookCalls["api10_probe on_notification"] == 1,
+			"each delivery is bracketed as the receiver's on_notification");
+
+		ClickPanel(P, 1);
+		Check(lastDrainDeliveries == 4 && notes.size() == 1, "an endless cascade stops after 4 rounds, and the rest waits for the next drain");
+		notes.clear();
+		ClickPanel(P, 2);
+		Check(probe("flood accepted") == 256 && notes.empty(), "a mod may post 256 notifications between deliveries; the rest are refused");
+		ClickPanel(P, 3);
+		Check(probe("bad name") == 0, "notify() refuses a bad name");
+
+		const int pongNotes = pong("notes");
+		inHook = true;
+		L.save();
+		inHook = false;
+		Check(modData[P]["saved"] == "yes" && probe("saves") == 1 && hookCalls["api10_probe on_save"] == 1,
+			"save runs each mod's on_save, whose set_data lands under its name");
+		Check(notes.size() == 1 && pong("notes") == pongNotes, "what on_save posts is not delivered during the save");
+		flying = true;
+		Step();
+		Check(pong("got test10.ping|after save|api10_probe") == 1, "it is delivered at the next drain, after the save");
+		Check(probe("energy fraction") == 50 && probe("fuel fraction") == 25, "energy_fraction() and fuel_fraction()");
+		conditions["test: api10"] = 0;
+	}
+
 	const char *const PROBE5 = "api5_probe";
 
 	int64_t Probe5(const string &key)
@@ -1456,8 +1746,9 @@ namespace {
 
 	// The mods that must load from the test sources, in name order, and those that must not.
 	const vector<string> LOADED = {
-		"api2_probe", "api5_probe", "api6_probe", "api7_probe", "api8_probe", "api9_probe", "bad_indices", "hull_regen",
-		"ingame_probe", "override_me", "plain_es_mod", "plain_mod", "spin_step", "spin_stubborn", "throws_on_step",
+		"api10_pong", "api10_probe", "api2_probe", "api5_probe", "api6_probe", "api7_probe", "api8_probe", "api9_probe",
+		"bad_indices", "future_sdk", "hull_regen", "ingame_probe", "odd_min_api", "override_me", "plain_es_mod", "plain_mod", "spin_step",
+		"spin_stubborn", "throws_on_step",
 	};
 
 	// es_loader_init: what it declines, and what it writes.
@@ -1484,7 +1775,7 @@ namespace {
 		std::memset(&loader, 0, sizeof(loader));
 		loader.size = sizeof(EsLoader);
 		EsHost old = host;
-		old.version = ES_API_VERSION - 1;
+		old.version = 8;
 		Check(init(&old, &loader) != 0 && !loader.load_mods, "an API 8 game is declined");
 		EsHost shorter = host;
 		shorter.size = offsetof(EsHost, ship_in_stock);
@@ -1500,13 +1791,14 @@ namespace {
 		std::memset(&box, 0xAB, sizeof(box));
 		std::memset(&box.table, 0, sizeof(box.table));
 		box.table.size = sizeof(box);
-		Check(init(&host, &box.table) == 0, "the loader accepts an API 9 game");
+		Check(init(&host, &box.table) == 0, "the loader accepts an API " + to_string(ES_API_VERSION) + " game");
 		bool untouched = std::all_of(box.extra, box.extra + sizeof(box.extra), [](unsigned char c) { return c == 0xAB; });
 		L = box.table;
 		Check(untouched && L.size == sizeof(EsLoader) && L.version == ES_API_VERSION, "it fills its own table, sets its size and version, and writes nothing past it");
 		Check(L.name && string(L.name).rfind("Dado loader ", 0) == 0, string("it names itself (") + (L.name ? L.name : "null") + ")");
 		Check(L.load_mods && L.count && L.step && L.day && L.enter && L.planet_button && L.panel && L.can_outfitter && L.outfitter
-			&& L.confirm && L.panel_row && L.panel_header && L.number && L.shutdown, "it fills every entry");
+			&& L.confirm && L.panel_row && L.panel_header && L.number && L.shutdown && L.save && L.pilot_loaded && L.notification,
+			"it fills every entry");
 	}
 
 	// What load_mods found and loaded.
@@ -1528,7 +1820,13 @@ namespace {
 		});
 		Check(loadBracketed && hookCalls["spin_load load"] == 1 && hookCalls["not_a_mod load"] == 1 && hookCalls["broken load"] == 1,
 			"loading each mod is bracketed as its \"load\", closed even when it fails or is stopped, and on_load follows it");
-		Check(Logged("mod \"not_a_mod\" was refused") && Logged("mod \"wrong_api\" was refused"), "a class that is no mod, and a mod for another API, are refused");
+		Check(Logged("mod \"not_a_mod\" was refused") && Logged("mod \"wrong_api\" was refused: it needs mod API 999"),
+			"a class that is no mod, and a mod that needs a newer API (min_api), are refused");
+		Check(conditions["test: future sdk ran"] == 1, "a mod built with a newer SDK that needs only an older API (min_api) runs");
+		Check(conditions["test: odd min api ran"] == 1 && Logged("mod \"odd_min_api\": its min_api() did not answer a whole number"),
+			"a min_api that is no whole number is logged and taken as 1");
+		Check(Logged("mod \"legacy_future\" was refused: it was built for mod API 999") && conditions["test: legacy future ran"] == 0,
+			"a mod without min_api, built for a newer API, is refused by its api_version, as before");
 		Check(Logged("mod \"broken\" did not load"), "a mod that does not compile is refused, and says why");
 		Check(conditions["test: override"] == 2 && hookCalls["override_me on_load"] == 1,
 			"a later source's mod replaces an earlier one's of the same name");
@@ -1636,14 +1934,65 @@ namespace {
 	}
 }
 
+namespace {
+	// fake_host --api9-host <library> <source>: the loader on a game of mod API 9,
+	// whose host table ends at ship_in_stock and which reserves an API 9 EsLoader.
+	int Api9HostMain(const char *library, const char *source)
+	{
+		setenv("ES_DADO_LOAD_MS", "500", 1);
+		EsLoaderInitFn init = OpenLoader(library);
+		if(!init)
+			return 1;
+		host = MakeHost();
+		host.size = offsetof(EsHost, trade_price);
+		host.version = 9;
+		const size_t reserved = offsetof(EsLoader, save);
+		struct { EsLoader table; } box;
+		std::memset(&box, 0xAB, sizeof(box));
+		std::memset(&box.table, 0, reserved);
+		box.table.size = static_cast<uint32_t>(reserved);
+		Check(init(&host, &box.table) == 0, "the loader accepts an API 9 game");
+		const unsigned char *past = reinterpret_cast<const unsigned char *>(&box.table) + reserved;
+		Check(std::all_of(past, past + (sizeof(EsLoader) - reserved), [](unsigned char c) { return c == 0xAB; })
+			&& box.table.size == reserved && box.table.version == ES_API_VERSION,
+			"it fills only the API 9 table the game reserved, and says it speaks API " + to_string(ES_API_VERSION));
+		std::memset(&L, 0, sizeof(L));
+		std::memcpy(&L, &box.table, reserved);
+		const char *paths[] = {source};
+		const char *names[] = {"Test Mods"};
+		inHook = true;
+		L.load_mods(1, paths, names);
+		inHook = false;
+		Check(Logged("dado: loaded mod \"api10_probe\"") && L.count() > 10, "the mods load on it, API 10 mods too");
+		conditions["test: api10 old"] = 1;
+		flying = false;
+		Enter("Alpha");
+		ClickPlanetButton("api10_probe");
+		auto probe = [](const string &key) { auto it = conditions.find("test: api10 " + key); return it == conditions.end() ? 99 : it->second; };
+		Check(probe("old done") == 1, "an API 10 mod's calls on an API 9 game do not fail");
+		Check(probe("old price") == -1 && probe("old base") == -1 && probe("old outfit stock") == -1,
+			"the calls that answer -1 for unknown answer -1 there");
+		Check(probe("old commodities") == 0 && probe("old name") == 1 && probe("old cargo") == 0 && probe("old park") == 0
+			&& probe("old remove") == 0 && probe("old parked") == 0 && probe("old notify") == 0 && probe("old has") == 0,
+			"the others answer 0, \"\" or false, and change nothing");
+		Check(hookTimingBalanced && hooksOpen == 0 && unbracketed == 0, "every bracket was closed");
+		L.shutdown();
+		std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
+		return failures ? 1 : 0;
+	}
+}
+
 int main(int argc, char *argv[])
 {
 	if(argc == 6 && string(argv[1]) == "--watchdog")
 		return WatchdogMain(argv[2], argv[3], argv[4], argv[5]);
+	if(argc == 4 && string(argv[1]) == "--api9-host")
+		return Api9HostMain(argv[2], argv[3]);
 	if(argc < 3)
 	{
 		std::fprintf(stderr, "usage: fake_host <loader library> <resources> [<plugin>...]\n"
-			"       fake_host --watchdog <loader library> <load ms> <hook ms> <source>\n");
+			"       fake_host --watchdog <loader library> <load ms> <hook ms> <source>\n"
+			"       fake_host --api9-host <loader library> <source>\n");
 		return 2;
 	}
 	// A shorter load limit than the default, so the test of it is quick.
@@ -1711,6 +2060,7 @@ int main(int argc, char *argv[])
 	TestApi7();
 	TestApi8();
 	TestApi9();
+	TestApi10();
 	TestWatchdog();
 
 	Check(hookTimingBalanced && hooksOpen == 0, "the loader began and ended the timing of every hook, one at a time");

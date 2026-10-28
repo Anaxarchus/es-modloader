@@ -1,5 +1,13 @@
 # Plan: shipyards with stock (Mod API 9 + Corporations supply chain)
 
+**Where the mod lives (2026-10-27):** the canonical source of the Corporations
+mod (and of Diplomacy and Outfit Integration) is now the `es-mods` repository,
+`es-mods/mods/corporations/`, which vendors the SDK pieces it needs and releases
+the mods (`tools/release.sh`). The commands below work there unchanged (run them
+from `es-mods` instead of `endless-sky-mod-sdk`); the SDK's `mods/corporations/`
+is a copy. This file is kept byte-identical in `es-mods/mods/corporations/HANDOFF.md`
+and `es-modloader/PLAN-shipyard-stock.md`.
+
 Status: **Task A done** (2026-10-27, uncommitted): the engine side, in
 `PlayerInfo` (`ShipStockEnabled`/`SetShipStockEnabled`, `ShipStock`,
 `SetShipStock`, `AddShipStock`, `ShipOrderNote`/`SetShipOrderNote`, the
@@ -18,8 +26,11 @@ table), C2 (inventory) and C5 (civilian restocks), with tests, a balance run
 and QuickJS timing; revised after an independent review (same day: reload
 revision, safe deploy, cache test, compact restock records, human shipyards
 only, delisted models); deployed to `endless-sky/plugins/Corporations` for
-the user to test in the game. C3, C4, C6, C7 and C8 are next; see "Task C
-progress" at the end of Task C. Before starting, read
+the user to test in the game. **Milestone M1 done** (2026-10-27, uncommitted,
+deployed to `endless-sky/plugins/Corporations`): the five quick wins from the
+design survey plus C3/C4 (the losses economy), C6 (military tenders), C8 (the
+map and its layers) and news with causes and spaceport news; see "M1" after
+"Task C progress". C7 (player orders) moves to M2. Before starting, read
 `es-modloader/HANDOFF.md` (API 5–9 history; the game's `modding/` folder it
 mentions became the `es-modloader` repository on 2026-10-27),
 `es-modloader/README.md`, and AGENTS.md and CLAUDE.md in
@@ -365,9 +376,9 @@ New calls:
 
 ### Task C progress
 
-**Done: C1, C2, C5** (2026-10-27). Not done: C3 (NPC demand), C4 (losses),
-C6 (military tenders), C7 (player orders), C8 (map). Each has a marked slot
-in the code (below).
+**Done: C1, C2, C5** (2026-10-27); C3, C4, C6 and C8 in M1 (next section,
+which supersedes the C3 TODOs and numbers below). Not done: C7 (player
+orders, M2).
 
 **C1, the hull table.** `tools/make-hulls.mjs <data>` writes `src/Hulls.dados`
 (and `test/models.json` for FakeGame) from `data/human/ships.txt`,
@@ -547,6 +558,306 @@ two thirds of `on_day`; with C3's NPC demand (many more restocks) watch the
 replace the C6 skip in `restock` and fill `order_note`; player orders use
 `Contract` RESTOCK-like contracts ahead of restocks in the owner's queue;
 the map rings use `Names.canon_homes`.
+
+### M1 (2026-10-27)
+
+The user approved every suggestion of the design survey; M1 is the five quick
+wins plus C3/C4, C6, C8 and news. M2 and M3 come in later sessions (below).
+Built and tested on a copy of `es-mods`, then copied into
+`es-mods/mods/corporations/` and deployed. Built against Mod API 9 (the copy
+keeps the API 9 SDK; `es-mods`' SDK is at API 10 now, uncommitted), with
+guarded API 10 paths (see "Review fixes" at the end of this section).
+
+**New files:** `src/Losses.dados` (the losses economy), `src/MapView.dados`
+(the map and its layers), `src/Press.dados` (spaceport news),
+`tools/make-news.mjs` (writes `data/corporations.txt`), `tools/probe.mjs`
+(the survey's strategy probe, now with arguments and risk figures),
+`test/m1.test.mjs` (15 tests). `tools/balance.mjs` now prints NPC sales,
+military shelf-days and the longest empty military shelf, tenders, hull
+income against all earnings, every shipbuilder's capacity at years 5, 10 and
+14, and the largest state; `balance.mjs 5000 3 nobuy` runs without the player.
+
+**Quick win 1, saving.** The game writes the pilot file only while landed (at
+takeoff, before the day the takeoff starts; on quitting on a planet; when the
+load screen opens on one; a mission's autosave is a separate file). So the
+market is saved on every landing (`on_enter`, which also pushes shelf counts)
+and after every trade (`on_number`), and in flight only every `SAVE_EVERY`
+(10) days or on a day that touched the player's credits (`Market.must_save`:
+dividends, buyouts, bankruptcies). A main save therefore always holds the
+market as it is. Loading a mission's autosave taken in flight replays the
+days since the last save from the saved random state: identical except the
+witnessed losses and the war's day-by-day state in those days (tested: save,
+fly 7 days, load, replay = same market; autosave 4 days behind replays to the
+same market). The first change after a save bumps `rev` in storage (cheap),
+and `prepare` also re-reads when the market in memory is dirty and ahead of
+the game's day, so an earlier save is never overlaid. On a game with API 10's
+`on_save` the market is saved there instead (Review fixes, 10).
+
+**Quick win 2, prices and buyouts.** An announced bid gaps the target to
+`DEAL_GAP` (0.92) of the offer; at completion a bid fails `BID_FAIL` (33%;
+45% for a company for sale): financing, regulators, the target's board, and
+the price falls back to 0.88–0.98 of where it stood (×0.85 for sale). Noise
+halved and moved into a persistent per-company **mood** (log offset on fair
+value, fading with half-life about 170 days), so noise and price-only news
+(scandal, new chief, tender award) last instead of reverting on a timetable;
+the price closes 20% of its gap a day. Reports and cycle changes move the
+price at once by 0.8 of the change in fair value (no post-report drift); the
+digest replaces the old surprise jump. Fair value now rests on **normal
+earnings** (`Company.norm`, an average each report moves 8%) at 15% and on
+capacity × the sector's earnings per capacity at 85%; the growth flip
+(1.15/0.9) is gone; one soft floor at half of (yards − half the debt) for
+profit and loss alike (before: cash, which swings with every contract,
+was in it, and loss-makers had a higher floor than small earners). Luck bias
+narrowed to 55%/45%; cycle multiples compressed (1.15 … 0.8); dividends pay
+on the four-report average, payout 15–40%.
+
+**Quick win 3 and C6, military tenders.** Each day a government whose military
+shelves of a model fall short (one more each while urgent) tenders for the gap
+less its open and running tenders (a gap of one waits for an empty shelf
+unless urgent); at most 6 hulls a tender. The government is the planet's
+(live `planet_government`), so any government, including a new rebel one, can
+tender; a tender is a `Contract` of kind `TENDER` (4) open 5 days (2 urgent)
+to every listed shipbuilder with spare capacity, wherever it is. `award`
+weighs price against delivery days (`delivery_days`: faster with spare yards,
+slower busy or unhealthy; `DAYS_WEIGHT` 0.5). Award: news with bids and the
+runner-up, a mood lift up to 8%, the winner's earnings cause. An invented
+winner can fail on delivery (the usual reliability roll) or by bankruptcy;
+the tender is then issued again the next day. Delivery fills the
+government's shelves of the model most short first. No bidder twice: the
+government's own yards build at half speed (`government_build`), so a Navy
+shelf is never empty for good. Urgency (`URGENT_DAYS` 30): a war, or a war
+event (a new war, a capture, a flotilla destroyed, from Diplomacy's
+statistics). Notes on empty military shelves give the tender's state and due
+date (`Fmt.date`). Contracts tab: tenders first, tagged "(military)", with
+the closing date and the bidders before award.
+
+**Several wars, new governments.** `Market.war_pairs` reads the wars
+(today the one `diplomacy: war a/b` pair; Diplomacy is moving to several wars
+and rebel governments: read the new per-war conditions there and name new
+factions in `government_name`). Everything else takes any number of wars
+(`wars`, `at_war`, `enemies`) between any governments. `Market.war_event`
+is the hook for API 10's bus (`diplomacy.war`, `.peace`, `.capture`,
+`.battle`, `.siege`).
+
+**Shipyards that change.** Every 30 days every planet in human space is
+checked as a landing checks its own: new listings get shelves (Diplomacy's
+Navy Advanced shipyard on Luna becomes a Republic military yard), cleared
+ones lose theirs (Geminus until "geminus rebuilt"), and a shipyard that
+opened during the session is stocked from then on (no longer next session).
+
+**Quick win 4, canon builders.** Utilisation is the average load since the
+last report (restocks and tenders included); a canonical company does not
+shrink while profitable, nor below half its founding capacity; the canon
++0.02 bid margin is gone; new listings draw a sector by work share,
+busyness and fewness (before: always the busiest, i.e. shipbuilding).
+`RESTOCK_MARGIN` went to 0.01, not the survey's 0.06: with C3's NPC sales
+the hull volume rose about five-fold, and at 0.06 hull income was
+three-quarters of all corporate earnings, which inflated shipbuilders' value
+until value-share antitrust broke the canon builders up again and again
+(each breakup a new invented shipbuilder). At 0.01 (+ `ROYALTY` 0.004 on NPC
+sales) hull income is about 30% of earnings.
+
+**Quick win 5 and news.** Reports fold into one "Earnings:" line a day: up to
+three notable companies, each "beats" or "misses" its last report with both
+figures and its cause ("after winning the Republic tender for 2 Cruisers",
+"on hull sales near Alnitak", "after a fire at its works", "while X bids for
+it"); the rest counted. News lines carry tags (`day|text|tags`: `s`
+shipyards, `w` war, `c<id>`); the News heading cycles All / Yours /
+Shipyards / War, and a line chooses its company. **Spaceport news**
+(`Press`): every `game.change` is an unnamed event whose changes the pilot
+keeps for good, so canonical companies' items (tender, fire, beats) and loss
+spikes per shipyard system are written in the plugin's data
+(`data/corporations.txt`, 84 items), each shown while
+`"corporations: news <key>" >= "days since epoch"`: posting is one
+`set_condition` to its last day and it hides itself, with no pilot growth.
+Invented companies' items use 4 slots given place and text by a change, at
+most one in 10 days (about 250 bytes each, about 9 KB a pilot-year at most).
+At most 8 show at once, 20 days each.
+
+**C3/C4, losses.** `Losses`: one region per stocked shipyard system (35), the
+human systems within 3 jumps (BFS cached by Galaxy). Daily losses per system:
+1 base, +2 pirate system / +0.6 next to one, +0.8 in a warring government's
+space / +2 on its front, +20 at a Diplomacy raid (a third next to it), +8 at
+a war flotilla, +4 per witnessed loss (×2 if the player did it; `on_step`
+buffers the `losses()` feed, which is there only in its step). Heat is a
+30-day exponential window, split by cause; the loss index is heat over a
+quiet region's (1). NPC sales: per shipyard per day one draw with the summed
+chance of its stocked shelves (`npc_rate` by class, military halved) × the
+index (clamped 0.5–4); a witnessed loss is replaced at once from the nearest
+stocked shelf of its model within 3 jumps (always if the player destroyed it,
+else half the time). The owner (military: the model's last tender builder)
+earns `ROYALTY`. Legible: loss index and cause in each shipyard system's map
+panel and the losses layer; news on spikes (index ≥ 2.5 and 1.6× its steady
+level, once in 45 days a region; spaceport item too); an owner's sidebar
+names the regions driving its demand. Restocks merge: one running restock
+per shelf takes on new orders.
+
+**C8, map.** Canon homes: `map_ring(system, 1.5)` in gold plus `map_label`
+with the short name (`Names.canon_short`); invented: the quiet marker. Layers
+on the exchange's new Map tab, kept in pilot data `layers`: shortages,
+restocks and tenders in flight (lines builder → shipyard), regional losses,
+holdings. At most 200 calls a draw (`MapView.BUDGET`; tested with every layer
+on and every shelf empty: under 200).
+
+**State size.** Finished contracts are saved short (`d|`, a third of a
+line); companies gone a month or more drop their price history and reports.
+
+**Numbers (before → after).** Probe, 4000 days, four seeds after:
+- buyout bought on announcement, 7 days: +27.5% (40/40 completed, worst
+  +10%) → −1.2% average (−4.8% … +3.7%), 22–42% of bids lose, worst −26%;
+- buying the bottom 5% of the 60-day range, 30 days: +26.3% against +6.3%
+  random → +2.3 … +3.7% against +0.4 … +0.8% (half of those buys lose; sd
+  15–20%, random 13–17%): a residual edge of about 2.5 points, mostly
+  companies on their value floor recovering;
+- mean |30-day move| 34% → 9–11%; payers' yield 12.3% → about 4%.
+Builders (balance, buying player; capacity at years 5 / 10 / 14), before:
+Betelgeuse 2.8 / 4.9 / 3.6, Lionheart 4.8 / 2.9 / 3.3, Southbound
+13.5 / 15.5 / 6.1, Tarazed 3.2 / 16.3 / 24.9, Gemini 8.3 / 2.8 / 2.8,
+Syndicated 23.7 / 7.6 / 8.8, Tycho 41.2 / 2.9 / 11.9; largest invented
+Pellucid 30.5; 19 shipbuilders. After: Betelgeuse 25.2 / 15.2 / 19.0,
+Lionheart 29.6 / 15.9 / 13.4, Southbound 28.6 / 27.1 / 36.7, Tarazed
+27.4 / 29.0 / 29.2, Gemini 27.8 / 26.7 / 6.0 (its floor; it owns one unsold
+hull), Syndicated 23.4 / 29.4 / 37.0, Tycho 5.6 / 7.6 / 35.4; largest
+invented 22.6 / 30.2 / 17.9; 14 shipbuilders. Without the player: canon
+16–46 at year 14 (Gemini 5.9), largest invented 17.5.
+Empty military shelf-days a year: 293 … 9,259 growing → 46 … 364, longest a
+military shelf sits empty 26–130 days (it was never refilled before). Civil
+empty shelf-days rose (about 1,300 → 3,500 a year) with about 750 NPC sales a
+year; average lead 29–40 days. Tenders 8–22 a year, 0–3 failed.
+QuickJS `on_day` (5000 days): 3.06 → 1.79 ms; with the buying player
+3.25 → 1.59 ms. State at day 5000: 100 → 88 KB (largest seen 109 KB);
+with the buying player 108 → 110 KB (largest 112 KB). V8 test run: largest
+saved 111 KB; 500 saves in 5000 days.
+
+**Tests.** `npm test` 41/41 (m1.test.mjs 15: save cadence ×3, buyout gap
+and failures, tenders ×3, losses ×2, map, digest and filter, spaceport news,
+several wars and a rebel government, shipyards changing at run time ×2; the
+long test now also checks military shelves are never empty over 150 days,
+saves not daily, state under 120 KB, at most 8 news items, canon builders
+keep their yards, no "profit; shares fall" lines). Mutation-checked: no price
+gap → the buyout test fails; no `rev` bump → the save/load test fails; no
+shelf delivery → two tender tests fail; player kills not doubled → the
+witnessed-loss test fails. `npm run check -- mods/corporations`,
+`npm run typecheck` pass.
+
+**Not seen in the game yet (in-game checklist):**
+1. The game's log on load shows no data errors for `data/corporations.txt`
+   (news items with `to show "…" >= "days since epoch"`; not parsed by a game
+   build here, there is no Linux build).
+2. The map: gold rings and short labels on canon homes; the Map tab switches
+   layers and they survive a save and load; a shipyard system's panel shows
+   "Loss index".
+3. A Navy hull bought to 0 at Geminus, Prime, Ada or Luna: the next day the
+   Contracts tab shows a "(military)" tender with bidders; after award, the
+   shipyard's note names the builder and a due date; the hull comes back.
+4. The News heading filters; an "Earnings:" line a day.
+5. Spaceport news near a canon home after its tender win or fire.
+6. Destroying a Shuttle near Sol lowers a Shuttle shelf at Earth or Luna.
+7. With Diplomacy at war: war news, more tenders, higher loss indexes on the
+   front; with a raid near a shipyard, a loss spike.
+8. Save on a planet, fly a few days, load: the market is the save's.
+
+**What M2 needs.**
+- *Convoys:* restocks and tender deliveries travel from the builder's home
+  to the shipyard (the orders layer already draws the lines); losses along
+  the route (Losses regions) delay or destroy them; jobs to escort them
+  (`offer_job`, as parts jobs). Needs a per-contract route and a loss roll
+  per day from the regions it crosses.
+- *Builder standing and C7 orders:* the player's standing with a builder
+  (from orders, escorts, holdings) and the C7 Orders tab at canon homes
+  (deposit, queue ahead of restocks, `buy_ship` on delivery). `Contract`
+  RESTOCK already carries model/units; add a client "player".
+- *Commodity crises:* the losses index and wars could drive the game's
+  commodity prices (API 10 `trade_price`), and shortages of parts raise
+  builders' costs.
+- *Sabotage:* player actions against a company (needs a mission template and
+  a cause on the target, like `Company.note`).
+
+**What M3 needs.** Executives (named, with traits, on `Company`), board power
+from the player's holdings (MAX_HOLDING 20% today), tips and shorts (a short
+position type in `holdings` and margin rules), Diplomacy sanctions (per-war
+conditions; `war_event` and the tender eligibility filter are the places),
+the player charter (a player company: deferred in §1), refits (API 10 outfit
+stock).
+
+**Blocked on API 10 or Diplomacy.** Used when present (guarded): `on_save`,
+the bus (`diplomacy.*`). Not used yet: bus payloads (undocumented; each event
+counts for every running war), `on_pilot_loaded` (could replace the `rev` and
+day checks), `trade_price` (commodity crises), outfit stock (refits), ship
+parking. Diplomacy: its per-war and per-minor conditions (`war_pairs` reads a
+guess, `diplomacy: wars` + `diplomacy: war <k> a/b`, falling back to
+`war a/b`; `faction_governments` names factions 1..3), and a published
+captured-system list so captures raise losses where they happen.
+
+#### Review fixes (2026-10-27, after an independent review)
+
+1. **Revisions never repeat.** `rev` is `"<n>.<session>"`: n is a high-water
+   mark for the game session (never reset on load), the session token is
+   drawn once (`Math.random`). Two save histories of a pilot reached the same
+   number before (snapshot S rev 13 → buy ×3 → S1 rev 16; load S → buy →
+   rev 16; load S1 kept the wrong market). Test from the reviewer's `rev.mjs`.
+2. **Safety mechanisms tested, each mutation-checked** (the test fails when
+   it is removed): `must_save` (a dividend before an in-flight autosave is not
+   paid twice on replay, `div.mjs`); open and running tenders subtracted from
+   the gap (at most one open tender per government and model, a growing gap
+   is added to it, `grow_tender`; under 80 tenders a year with a player buying
+   Navy hulls every 4 days, 57 measured); witnessed losses cleared (a single
+   loss's heat fades to under 20% in 60 days); spaceport items not re-posted
+   while showing; and the revision fix.
+3. **Autosave gaps closed:** a settled parts job and every `game.change` set
+   `must_save`. Spaceport items carry the day they happened, so a reload that
+   simulates several days at once posts them exactly as the first time.
+4. **Diplomacy:** human space (`Galaxy`) is every system reachable over the
+   lanes from the human governments' systems without entering an alien one
+   (`Galaxy.alien`, matched by name prefix), so a rebel-held system keeps its
+   shelves, region and lanes, and uninhabited systems inside human space link
+   it; the flotilla scan reads every side and slot up to 16 × 6, a raid by
+   kind (2) and a war flotilla by kind (0) whoever's it is; ordinary
+   contracts come from any government (pirates aside) holding human systems
+   with a bank, weighed by the square root of their count (`read_clients`);
+   `war_pairs` as above.
+5. **Tender deliveries** go only to the government's own shipyards that still
+   list the model (checked on delivery; a delisted shelf is dropped), each hull
+   to the shelf shortest of its target, never past it (one past while urgent);
+   hulls with nowhere to go stay with the government.
+6. **Conditions leave the save:** spaceport-news conditions go to 0 after their
+   window; parts-job conditions (`hauling`/`delivered`/`late`) go to 0 once
+   settled, and the contract is kept in `jobs_done` (saved `j|`) so the job is
+   not offered again.
+7. **Military royalties:** the builder of each military model's latest tender
+   is kept in `builders` (saved `b|`), not looked up in pruned contracts.
+8. **Antitrust:** canonical companies are reviewed only for their capacity
+   share, over 50% (or twice an even split), never for value: canon
+   shipbuilder breakups 4–20 per 5000 days → 0 on three seeds; all breakups
+   3–5 per 5000 days (non-shipbuilders: Megaparsec, Polymath, Lovelace, and
+   invented ones). Shipbuilding is still about 82–86% of the exchange's value
+   (as before M1): it earns about 30k a report per unit of capacity while
+   mining, freight, security, engines and electronics run near or below zero
+   (small companies reach few of the contracts issued across human space, so
+   many lapse). Not tuned here; an M2 item (contract reach, or sector demand).
+9. **Nits:** dead growth-tilt code and `Galaxy.powers` removed; the stale C6
+   comment fixed; one gold ring a system (Sol had two), a label per company.
+   **Spaceport news is seldom seen:** the game picks one item at random among
+   all that match a spaceport, vanilla ones included
+   (`SpaceportPanel::PickNews`). So each item is also told once as a message
+   ("Spaceport news: …") when the player lands within 2 jumps of it while it
+   shows.
+10. **Mod API 10, guarded:** this release still builds against API 9. When
+    the game object has `has` (checked with `Reflect.has`, so an API 9 game is
+    safe) and `has("on_save")`, the market is saved in `on_save` only and the
+    cadence and landing saves are off; with `has("notify")` the mod listens for
+    `diplomacy.*` and `on_notification` calls `Market.war_event` for every
+    running war. Tested with a FakeGame given `has`/`listen`.
+
+**Numbers after the review fixes.** Probe (3 seeds): buyout −0.5 … −2.0%
+(31–35% lose, worst −26%); 60-day low +1.5 … +3.2% against random +0.2 …
++1.3% (44–51% lose). Balance with the buying player: canon builders at year
+14: Southbound 45.0, Syndicated 30.7, Gemini 27.6, Lionheart 19.1, Tarazed
+15.3, Betelgeuse 13.4, Tycho 5.9 (its floor: it owns one hull); largest
+invented 22.9; 13 shipbuilders; military empty shelf-days 2,068 in 14 years,
+longest 84 days; 206 tenders, 2 failed. QuickJS `on_day`: 1.95 ms (1.70 ms
+with the buying player). State largest 92 KB (111 KB without the player).
+`npm test` 53/53.
 
 ## 4. Suggested order and done criteria
 

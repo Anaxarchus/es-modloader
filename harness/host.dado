@@ -114,6 +114,31 @@ foreign "es_host.h":
     void es_map_label(cstring system, cstring text, f64 r, f64 g, f64 b)
     void es_map_ring(cstring system, f64 scale, f64 r, f64 g, f64 b)
     i32 es_ship_in_stock(cstring model)
+    // Mod API 10. Optional: an API 9 game lacks them, the shim then answers 0 or
+    // "", and es_has_<field>() says whether the game has each.
+    i32 es_trade_price(cstring system, cstring commodity)
+    i32 es_trade_base_price(cstring system, cstring commodity)
+    i32 es_commodity_count()
+    cstring es_commodity_name(i32 k)
+    i32 es_ship_park(cstring ship, i32 on)
+    i32 es_ship_remove(cstring ship)
+    i32 es_ship_parked(cstring ship)
+    void es_outfit_stock_on(i32 on)
+    i32 es_outfit_stock(cstring planet, cstring outfit)
+    void es_set_outfit_stock(cstring planet, cstring outfit, i32 count)
+    i32 es_cargo(cstring commodity)
+    i32 es_notify(cstring name, cstring payload)
+    void es_listen(cstring pattern)
+    void es_unlisten(cstring pattern)
+    i32 es_api_has(cstring feature)
+    cstring es_api_features()
+    void es_timing_section(cstring name)
+    f64 es_ship_energy_fraction(i32 i)
+    f64 es_ship_fuel_fraction(i32 i)
+    i32 es_has_trade_price()
+    i32 es_has_trade_base_price()
+    i32 es_has_outfit_stock()
+    i32 es_has_api_has()
 
 // A ship index the game can take: inside i32, and in this step's snapshot.
 private bool valid_ship(i64 i):
@@ -670,3 +695,116 @@ i64 host_ship_in_stock(string8 model):
     ref []char8 m = strings.clone_to_cstring(model)
     defer #delete(m)
     return es_ship_in_stock(cstring(rawptr(&m[0])))
+
+// ---- Mod API 10 ----
+// On an API 9 game these calls are missing: the shim answers 0 or "" and does
+// nothing, and the calls documented to answer -1 for "unknown" check first.
+
+i64 host_trade_price(string8 system, string8 commodity):
+    if es_has_trade_price() == 0:
+        return -1
+    ref []char8 x = strings.clone_to_cstring(system)
+    defer #delete(x)
+    ref []char8 c = strings.clone_to_cstring(commodity)
+    defer #delete(c)
+    return es_trade_price(cstring(rawptr(&x[0])), cstring(rawptr(&c[0])))
+
+i64 host_trade_base_price(string8 system, string8 commodity):
+    if es_has_trade_base_price() == 0:
+        return -1
+    ref []char8 x = strings.clone_to_cstring(system)
+    defer #delete(x)
+    ref []char8 c = strings.clone_to_cstring(commodity)
+    defer #delete(c)
+    return es_trade_base_price(cstring(rawptr(&x[0])), cstring(rawptr(&c[0])))
+
+i64 host_commodity_count():
+    return es_commodity_count()
+
+string8 host_commodity_name(i64 k):
+    if !in_i32(k):
+        return ""
+    return from_c(es_commodity_name(i32(k)))
+
+bool host_ship_park(string8 ship, bool on):
+    ref []char8 s = strings.clone_to_cstring(ship)
+    defer #delete(s)
+    return es_ship_park(cstring(rawptr(&s[0])), 1 if on else 0) != 0
+
+bool host_ship_remove(string8 ship):
+    ref []char8 s = strings.clone_to_cstring(ship)
+    defer #delete(s)
+    return es_ship_remove(cstring(rawptr(&s[0]))) != 0
+
+bool host_ship_parked(string8 ship):
+    ref []char8 s = strings.clone_to_cstring(ship)
+    defer #delete(s)
+    return es_ship_parked(cstring(rawptr(&s[0]))) != 0
+
+void host_outfit_stock_on(bool on):
+    es_outfit_stock_on(1 if on else 0)
+
+i64 host_outfit_stock(string8 planet, string8 outfit):
+    if es_has_outfit_stock() == 0:
+        return -1
+    ref []char8 p = strings.clone_to_cstring(planet)
+    defer #delete(p)
+    ref []char8 o = strings.clone_to_cstring(outfit)
+    defer #delete(o)
+    return es_outfit_stock(cstring(rawptr(&p[0])), cstring(rawptr(&o[0])))
+
+void host_set_outfit_stock(string8 planet, string8 outfit, i64 count):
+    // Any negative count untracks; a count beyond i32 is clamped.
+    i64 n = count
+    if n < 0:
+        n = -1
+    if n > 2147483647:
+        n = 2147483647
+    ref []char8 p = strings.clone_to_cstring(planet)
+    defer #delete(p)
+    ref []char8 o = strings.clone_to_cstring(outfit)
+    defer #delete(o)
+    es_set_outfit_stock(cstring(rawptr(&p[0])), cstring(rawptr(&o[0])), i32(n))
+
+i64 host_cargo(string8 commodity):
+    ref []char8 c = strings.clone_to_cstring(commodity)
+    defer #delete(c)
+    return es_cargo(cstring(rawptr(&c[0])))
+
+bool host_notify(string8 name, string8 payload):
+    ref []char8 n = strings.clone_to_cstring(name)
+    defer #delete(n)
+    ref []char8 p = strings.clone_to_cstring(payload)
+    defer #delete(p)
+    return es_notify(cstring(rawptr(&n[0])), cstring(rawptr(&p[0]))) != 0
+
+void host_listen(string8 pattern):
+    ref []char8 p = strings.clone_to_cstring(pattern)
+    defer #delete(p)
+    es_listen(cstring(rawptr(&p[0])))
+
+void host_unlisten(string8 pattern):
+    ref []char8 p = strings.clone_to_cstring(pattern)
+    defer #delete(p)
+    es_unlisten(cstring(rawptr(&p[0])))
+
+bool host_api_has(string8 feature):
+    if es_has_api_has() == 0:
+        return false
+    ref []char8 f = strings.clone_to_cstring(feature)
+    defer #delete(f)
+    return es_api_has(cstring(rawptr(&f[0]))) != 0
+
+string8 host_api_features():
+    return from_c(es_api_features())
+
+void host_timing_section(string8 name):
+    ref []char8 n = strings.clone_to_cstring(name)
+    defer #delete(n)
+    es_timing_section(cstring(rawptr(&n[0])))
+
+f64 host_ship_energy_fraction(i64 i):
+    return es_ship_energy_fraction(i32(i)) if valid_ship(i) else 0.0
+
+f64 host_ship_fuel_fraction(i64 i):
+    return es_ship_fuel_fraction(i32(i)) if valid_ship(i) else 0.0

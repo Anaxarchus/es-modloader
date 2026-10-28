@@ -1,10 +1,14 @@
 class WrongApi extends es.Mod
 
-// A test mod that claims another mod API version. The harness must refuse it.
+// A test mod that needs a newer mod API than any loader speaks (min_api 999).
+// The harness must refuse it.
 
 import "imports:sdk/es"
 
 int api_version():
+    return 999
+
+int min_api():
     return 999
 
 void on_step(es.Game game, int step):

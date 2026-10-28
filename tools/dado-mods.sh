@@ -145,6 +145,9 @@ test)
 		build_mod "$d" "$work/Test Mods/scripts/$(basename "$d").js" >/dev/null
 	done
 	"$work/fake_host" "$loader" "$work/resources" "$work/Test Mods" "$work/Zipped.zip" "$work/Override"
+	# Mod API 10's calls on a game of mod API 9.
+	echo "== the loader on an API 9 game"
+	"$work/fake_host" --api9-host "$loader" "$work/Test Mods"
 	# The watchdog's timing: a short hook limit after a long load limit, and the reverse.
 	for limits in "2000 250" "300 1000"; do
 		echo "== watchdog, load and hook limits (ms): $limits"

@@ -1,0 +1,22 @@
+class Api10Pong extends es.Mod
+
+// The other half of api10_probe's bus test: it listens for "test10.ping" and
+// answers "reply" and "loop" pings with a "test10.pong". It records what it got
+// in conditions named "test: api10 pong ...".
+
+import "imports:sdk/es"
+
+string name():
+    return "api10 pong"
+
+void on_load(es.Game game):
+    game.listen("test10.ping")
+
+void on_pilot_loaded(es.Game game):
+    game.set_condition("test: api10 pong pilot loaded", game.condition("test: api10 pong pilot loaded") + 1)
+
+void on_notification(es.Game game, string name, string payload, string sender):
+    game.set_condition("test: api10 pong got " + name + "|" + payload + "|" + sender, 1)
+    game.set_condition("test: api10 pong notes", game.condition("test: api10 pong notes") + 1)
+    if payload == "reply" || payload == "loop":
+        game.notify("test10.pong", payload)

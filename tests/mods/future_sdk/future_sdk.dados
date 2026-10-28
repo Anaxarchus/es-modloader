@@ -1,0 +1,13 @@
+class FutureSdk extends es.Mod
+
+// A test mod built with a newer SDK than the loader's: its api_version is 999,
+// but it needs only mod API 1 (es.Mod's min_api). Since mod API 10 the loader
+// checks min_api, so it runs.
+
+import "imports:sdk/es"
+
+int api_version():
+    return 999
+
+void on_load(es.Game game):
+    game.set_condition("test: future sdk ran", 1)
