@@ -40,6 +40,7 @@ this program. If not, see <https://www.gnu.org/licenses/>.
 #include <filesystem>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <utility>
 #include <vector>
@@ -57,6 +58,9 @@ namespace {
 		string tag = "", government = "";
 		double strength = 0.;
 		bool arrived = false;
+		// API 11: its position, and the personality ship_reactivate gave it.
+		double x = 0., y = 0.;
+		string personality = "";
 	};
 
 	struct FakeSystem {
@@ -240,6 +244,7 @@ namespace {
 	const std::set<string> features = {
 		"api_has", "cargo", "notify", "on_notification", "on_pilot_loaded", "on_save", "outfit_stock",
 		"ship_fractions", "ship_parking", "timing_section", "trade_price", "call:ship_park", "call:notify",
+		"runtime_definitions", "outfit_transfer", "ship_reactivate", "call:define", "call:ship_reactivate",
 	};
 	// Timing sections, as "mod hook section", and the hook of the open bracket.
 	std::vector<string> sections;
@@ -1012,6 +1017,260 @@ void es_timing_section(const char *mod, const char *name)
 }
 }
 
+
+// ---- Mod API 11 ----
+namespace {
+	// What mods defined at runtime, by kind and name: the mod and the text that defined it.
+	struct RuntimeDef { string mod, text; };
+	std::map<std::pair<string, string>, RuntimeDef> runtimeDefs;
+	// Outfits the player carries as cargo, and in the landed planet's storage.
+	std::map<string, int> cargoOutfits, storageOutfits;
+
+	// A node's lines below its header, one indentation level less.
+	vector<string> Children(const vector<string> &lines)
+	{
+		vector<string> out;
+		for(const string &line : lines)
+			out.push_back(line.empty() ? line : line.substr(1));
+		return out;
+	}
+	bool Child(const string &line) { return !line.empty() && (line[0] == '\t' || line[0] == ' '); }
+	// An outfit node's children applied to an outfit: what the fake keeps of them.
+	void ApplyOutfit(FakeOutfit &outfit, const vector<string> &lines)
+	{
+		for(const string &line : lines)
+		{
+			vector<string> tokens = Tokens(line);
+			if(tokens.empty() || Child(line))
+				continue;
+			if(tokens[0] == "weapon")
+				outfit.weapon = true;
+			else if(tokens.size() < 2)
+				continue;
+			else if(tokens[0] == "category")
+				outfit.category = tokens[1];
+			else if(tokens[0] == "display name")
+				outfit.display = tokens[1];
+			else if(tokens[0] == "mass")
+				outfit.mass = std::atof(tokens[1].c_str());
+			else if(tokens[0] == "cost")
+				outfit.cost = std::atof(tokens[1].c_str());
+			else
+				outfit.attributes[tokens[0]] = std::atof(tokens[1].c_str());
+		}
+	}
+	// A ship node's children applied to a model; false when it installs an unknown outfit.
+	bool ApplyShip(FakeModel &model, const vector<string> &lines)
+	{
+		string block;
+		for(const string &line : lines)
+		{
+			vector<string> tokens = Tokens(line);
+			if(tokens.empty())
+				continue;
+			if(!Child(line))
+			{
+				block = tokens[0];
+				if(tokens[0] == "display name" && tokens.size() > 1)
+					model.display = tokens[1];
+				continue;
+			}
+			if(block == "outfits" && !FindOutfit(tokens[0].c_str()))
+				return false;
+			if(block == "attributes" && tokens.size() > 1 && tokens[0] == "category")
+				model.category = tokens[1];
+			if(block == "attributes" && tokens.size() > 1 && tokens[0] == "cost")
+				model.cost = std::atoll(tokens[1].c_str());
+		}
+		return true;
+	}
+	// The refusal rules: a name the data defines, or another mod's, or this
+	// mod's with other text. Answers whether it counts as defined, and defines it.
+	template <class Apply>
+	bool DefineOne(const string &mod, const string &kind, const string &name, const string &text, Apply apply)
+	{
+		auto it = runtimeDefs.find({kind, name});
+		if(it != runtimeDefs.end())
+			return it->second.mod == mod && it->second.text == text;
+		if(kind == "outfit" ? outfitDefs.count(name) != 0 : models.count(name) != 0)
+			return false;
+		if(!apply())
+			return false;
+		runtimeDefs[{kind, name}] = {mod, text};
+		return true;
+	}
+	bool DefineNode(const string &mod, const vector<string> &tokens, const vector<string> &children, const string &text)
+	{
+		if(tokens.size() == 2 && tokens[0] == "outfit")
+			return DefineOne(mod, "outfit", tokens[1], text, [&]() {
+				FakeOutfit outfit{tokens[1], "", 0., 0., false, {}};
+				ApplyOutfit(outfit, children);
+				outfitDefs[tokens[1]] = outfit;
+				return true;
+			});
+		if((tokens.size() == 2 || tokens.size() == 3) && tokens[0] == "ship")
+		{
+			const string &name = tokens.back();
+			return DefineOne(mod, "ship", name, text, [&]() {
+				FakeModel model{name, 0, "", ""};
+				if(tokens.size() == 3)
+				{
+					auto base = models.find(tokens[1]);
+					if(base == models.end())
+						return false;
+					model = base->second;
+					model.display = name;
+				}
+				if(!ApplyShip(model, children))
+					return false;
+				models[name] = model;
+				return true;
+			});
+		}
+		return false;
+	}
+}
+extern "C" {
+int32_t es_define(const char *mod, const char *text)
+{
+	if(!inHook)
+		return 0;
+	// Split into top-level nodes; outfits first, so a ship may install one defined after it.
+	struct Node { vector<string> tokens, children; string text; };
+	vector<Node> nodes;
+	std::istringstream in(text);
+	string line;
+	while(std::getline(in, line))
+	{
+		if(Tokens(line).empty())
+			continue;
+		if(!Child(line))
+			nodes.push_back({Tokens(line), {}, ""});
+		else if(!nodes.empty())
+			nodes.back().children.push_back(line.substr(1));
+		if(!nodes.empty())
+			nodes.back().text += line + "\n";
+	}
+	std::stable_partition(nodes.begin(), nodes.end(), [](const Node &node) { return node.tokens[0] == "outfit"; });
+	int32_t defined = 0;
+	for(const Node &node : nodes)
+		defined += DefineNode(mod, node.tokens, node.children, node.text);
+	return defined;
+}
+int32_t es_define_outfit_variant(const char *mod, const char *name, const char *base, const char *changes)
+{
+	const FakeOutfit *from = FindOutfit(base);
+	if(!inHook || !from || !*name)
+		return 0;
+	const FakeOutfit copy = *from;
+	return DefineOne(mod, "outfit", name, string("variant ") + base + "\n" + changes, [&]() {
+		FakeOutfit outfit = copy;
+		std::istringstream in(changes);
+		vector<string> lines;
+		for(string line; std::getline(in, line); )
+			lines.push_back(line);
+		ApplyOutfit(outfit, lines);
+		outfitDefs[name] = outfit;
+		return true;
+	});
+}
+int32_t es_define_ship_variant(const char *mod, const char *name, const char *base, const char *changes)
+{
+	auto from = models.find(base);
+	if(!inHook || from == models.end() || !*name)
+		return 0;
+	const FakeModel copy = from->second;
+	return DefineOne(mod, "ship", name, string("variant ") + base + "\n" + changes, [&]() {
+		FakeModel model = copy;
+		model.display = name;
+		std::istringstream in(changes);
+		vector<string> lines;
+		for(string line; std::getline(in, line); )
+			lines.push_back(line);
+		if(!ApplyShip(model, lines))
+			return false;
+		models[name] = model;
+		return true;
+	});
+}
+int32_t es_defined(const char *kind, const char *name)
+{
+	const string k = kind;
+	if(!inHook || (k != "outfit" && k != "ship"))
+		return 0;
+	if(runtimeDefs.count({k, name}))
+		return 2;
+	return (k == "outfit" ? outfitDefs.count(name) : models.count(name)) ? 1 : 0;
+}
+int32_t es_ship_replace_outfit(const char *mod, const char *uuid, const char *from, const char *to, int32_t count)
+{
+	(void)mod;
+	FleetShip *ship = FindFleetShip(uuid);
+	const FakeOutfit *out = FindOutfit(from);
+	const FakeOutfit *in = FindOutfit(to);
+	// A weapon needs the hardpoint of the one it replaces.
+	if(!playerAction || flying || outfitterShips || !ship || !out || !in || out == in || count <= 0 || (in->weapon && !out->weapon))
+		return 0;
+	const int n = std::min(count, Count(ship->outfits, from) - Count(ship->integrated, from));
+	if(n <= 0)
+		return 0;
+	if(!(ship->outfits[from] -= n))
+		ship->outfits.erase(from);
+	ship->outfits[to] += n;
+	return n;
+}
+int32_t es_outfit_take(const char *mod, const char *outfit, int32_t count, const char *from)
+{
+	(void)mod;
+	const string where = from;
+	if(!inHook || count <= 0 || !FindOutfit(outfit))
+		return 0;
+	int32_t taken = 0;
+	auto take = [&](std::map<string, int> &place) {
+		const int n = std::min(count - taken, Count(place, outfit));
+		if(n > 0 && !(place[outfit] -= n))
+			place.erase(outfit);
+		taken += std::max(n, 0);
+	};
+	if(where == "cargo" || where == "any")
+		take(cargoOutfits);
+	if((where == "storage" || where == "any") && !flying)
+		take(storageOutfits);
+	return taken;
+}
+int32_t es_outfit_give(const char *mod, const char *outfit, int32_t count, const char *to)
+{
+	(void)mod;
+	const string where = to;
+	if(!inHook || count <= 0 || !FindOutfit(outfit))
+		return 0;
+	if(where == "cargo")
+		return cargoOutfits[outfit] += count, count;
+	if(where == "storage" && !flying)
+		return storageOutfits[outfit] += count, count;
+	return 0;
+}
+double es_ship_distance(int32_t i)
+{
+	return Valid(i) ? std::hypot(ships[i].x - ships[0].x, ships[i].y - ships[0].y) : -1.;
+}
+double es_ship_x(int32_t i) { return Valid(i) ? ships[i].x : 0.; }
+double es_ship_y(int32_t i) { return Valid(i) ? ships[i].y : 0.; }
+int32_t es_ship_reactivate(int32_t i, const char *government, const char *personality)
+{
+	if(!Valid(i) || ships[i].player || !ships[i].disabled || (*government && !IsGovernment(government)))
+		return 0;
+	FakeShip &ship = ships[i];
+	ship.disabled = false;
+	ship.hull = std::max(ship.hull, std::min(ship.maxHull, ship.maxHull * .55));
+	if(*government)
+		ship.government = government;
+	if(*personality)
+		ship.personality = personality;
+	return 1;
+}
+}
+
 // The game drains the bus after the hooks it runs (FakeDrain is called where
 // the game calls ModHarness's DrainNotifications): up to 4 rounds or 1024
 // deliveries, the rest carried to the next drain.
@@ -1095,6 +1354,13 @@ namespace {
 	void Scoped_listen(const char *pattern) { if(!Scoped()) return; es_listen(currentMod.c_str(), pattern); }
 	void Scoped_unlisten(const char *pattern) { if(!Scoped()) return; es_unlisten(currentMod.c_str(), pattern); }
 	void Scoped_timing_section(const char *name) { if(!Scoped()) return; es_timing_section(currentMod.c_str(), name); }
+	int32_t Scoped_define(const char *text) { if(!Scoped()) return 0; return es_define(currentMod.c_str(), text); }
+	int32_t Scoped_define_outfit_variant(const char *name, const char *base, const char *changes) { if(!Scoped()) return 0; return es_define_outfit_variant(currentMod.c_str(), name, base, changes); }
+	int32_t Scoped_define_ship_variant(const char *name, const char *base, const char *changes) { if(!Scoped()) return 0; return es_define_ship_variant(currentMod.c_str(), name, base, changes); }
+	int32_t Scoped_defined(const char *kind, const char *name) { if(!Scoped()) return 0; return es_defined(kind, name); }
+	int32_t Scoped_ship_replace_outfit(const char *ship, const char *from, const char *to, int32_t count) { if(!Scoped()) return 0; return es_ship_replace_outfit(currentMod.c_str(), ship, from, to, count); }
+	int32_t Scoped_outfit_take(const char *outfit, int32_t count, const char *from) { if(!Scoped()) return 0; return es_outfit_take(currentMod.c_str(), outfit, count, from); }
+	int32_t Scoped_outfit_give(const char *outfit, int32_t count, const char *to) { if(!Scoped()) return 0; return es_outfit_give(currentMod.c_str(), outfit, count, to); }
 
 	EsHost MakeHost()
 	{
@@ -1224,6 +1490,17 @@ namespace {
 		host.timing_section = Scoped_timing_section;
 		host.ship_energy_fraction = es_ship_energy_fraction;
 		host.ship_fuel_fraction = es_ship_fuel_fraction;
+		host.define = Scoped_define;
+		host.define_outfit_variant = Scoped_define_outfit_variant;
+		host.define_ship_variant = Scoped_define_ship_variant;
+		host.defined = Scoped_defined;
+		host.ship_replace_outfit = Scoped_ship_replace_outfit;
+		host.outfit_take = Scoped_outfit_take;
+		host.outfit_give = Scoped_outfit_give;
+		host.ship_distance = es_ship_distance;
+		host.ship_x = es_ship_x;
+		host.ship_y = es_ship_y;
+		host.ship_reactivate = es_ship_reactivate;
 		return host;
 	}
 }
@@ -1652,6 +1929,62 @@ namespace {
 		conditions["test: api10"] = 0;
 	}
 
+	// Mod API 11, through tests/mods/api11_probe.
+	void TestApi11()
+	{
+		auto probe = [](const string &key) { auto it = conditions.find("test: api11 " + key); return it == conditions.end() ? -99 : it->second; };
+		Check(es_define("api11_probe", "outfit \"X\"\n") == 0 && es_defined("outfit", "Laser") == 0 && es_ship_distance(0) == -1.
+			&& es_outfit_give("api11_probe", "Battery", 1, "cargo") == 0, "API 11 calls outside a hook answer nothing and change nothing");
+		conditions["test: api11"] = 1;
+		flying = false;
+		landedPlanet = "Alpha I";
+		Enter("Alpha");
+		Check(probe("define") == 2 && probe("define same") == 1 && probe("define other text") == 0
+			&& probe("define data name") == 0 && probe("define other node") == 0 && probe("define unknown outfit") == 0,
+			"define() defines an outfit and a ship using it; the same text again counts; other text, a data name, another node and an unknown outfit are refused");
+		Check(runtimeDefs.size() == 4 && runtimeDefs[{"outfit", "Shield Core"}].mod == "api11_probe",
+			"definitions are made under the mod's name");
+		Check(probe("defined") == 2211 && probe("defined unknown") == 0 && probe("core shields") == 2,
+			"defined() answers 2 for runtime, 1 for data, 0 for unknown names and kinds");
+		Check(probe("outfit variant") == 1 && probe("outfit variant again") == 1 && probe("outfit variant changed") == 0
+			&& probe("variant") == 12500 && probe("variant unknown base") == 0,
+			"define_outfit_variant() copies the base and applies the changes; idempotent; refused for other changes or an unknown base");
+		Check(probe("ship variant") == 1 && probe("ship variant name") == 1, "define_ship_variant() derives from the base model");
+		Check(probe("give storage") == 3 && probe("take storage") == 3 && probe("give cargo") == 4 && probe("take any") == 1
+			&& probe("take nowhere") == 0 && probe("give unknown") == 0 && Count(cargoOutfits, "Battery") == 3 && storageOutfits.empty(),
+			"outfit_give() and outfit_take() move outfits in and out of cargo and storage");
+		Check(probe("replace in enter") == 0 && Count(fleet[1].outfits, "Battery") == 1,
+			"ship_replace_outfit() refuses outside a hook the player started");
+
+		ClickPlanetButton("api11_probe");
+		Check(probe("replace") == 1 && probe("replaced") == 10 && probe("replace none left") == 0 && probe("replace weapon") == 0
+			&& probe("replace zero") == 0 && probe("replace unknown") == 0 && Count(fleet[1].outfits, "Shield Core") == 1,
+			"ship_replace_outfit() replaces what is installed, no more; a weapon needs a hardpoint; a count below 1 or an unknown ship does nothing");
+
+		// In flight, with ships placed for the queries.
+		const vector<FakeShip> before = ships;
+		ships = {
+			{"Buggy Barge", "Star Barge", true, false, 500, 1000, 0, 600},
+			{"Pirate", "Bounder", false, false, 100, 800, 0, 400},
+			{"Wreck", "Bounder", false, true, 10, 800, 0, 400},
+		};
+		ships[0].x = 10.; ships[0].y = 20.;
+		ships[1].x = 310.; ships[1].y = 420.; ships[1].government = "Pirate";
+		ships[2].x = -50.; ships[2].y = 0.; ships[2].government = "Pirate";
+		flying = true;
+		Step();
+		Check(probe("distance flagship") == 0 && probe("distance") == 500 && probe("position") == 310420 && probe("distance bad") == -2,
+			"ship_distance(), ship_x() and ship_y(); -1 for an unknown index");
+		Check(probe("wreck") == 2 && probe("reactivate player") == 0 && probe("reactivate bad government") == 0 && probe("still disabled") == 1,
+			"ship_reactivate() refuses the player's ship and an unknown government, and changes nothing then");
+		Check(probe("reactivate") == 1 && probe("awake") == 1 && probe("reactivate again") == 0 && ships[2].personality == "heroic",
+			"ship_reactivate() wakes a disabled ship under a new government and personality, once");
+		Check(probe("flight give") == 2 && probe("flight storage") == 0 && Count(cargoOutfits, "Battery") == 5,
+			"in flight, outfits go to cargo, and there is no storage");
+		ships = before;
+		conditions["test: api11"] = 0;
+	}
+
 	const char *const PROBE5 = "api5_probe";
 
 	int64_t Probe5(const string &key)
@@ -1746,7 +2079,7 @@ namespace {
 
 	// The mods that must load from the test sources, in name order, and those that must not.
 	const vector<string> LOADED = {
-		"api10_pong", "api10_probe", "api2_probe", "api5_probe", "api6_probe", "api7_probe", "api8_probe", "api9_probe",
+		"api10_pong", "api10_probe", "api11_probe", "api2_probe", "api5_probe", "api6_probe", "api7_probe", "api8_probe", "api9_probe",
 		"bad_indices", "future_sdk", "hull_regen", "ingame_probe", "odd_min_api", "override_me", "plain_es_mod", "plain_mod", "spin_step",
 		"spin_stubborn", "throws_on_step",
 	};
@@ -1975,6 +2308,11 @@ namespace {
 		Check(probe("old commodities") == 0 && probe("old name") == 1 && probe("old cargo") == 0 && probe("old park") == 0
 			&& probe("old remove") == 0 && probe("old parked") == 0 && probe("old notify") == 0 && probe("old has") == 0,
 			"the others answer 0, \"\" or false, and change nothing");
+		conditions["test: api11 old"] = 1;
+		ClickPlanetButton("api11_probe");
+		auto probe11 = [](const string &key) { auto it = conditions.find("test: api11 " + key); return it == conditions.end() ? 99 : it->second; };
+		Check(probe11("old done") == 1 && probe11("old define") == 0 && probe11("old variants") == 0 && probe11("old defined") == 0
+			&& probe11("old replace") == 0 && probe11("old move") == 0, "an API 11 mod's calls on an older game answer 0 or false");
 		Check(hookTimingBalanced && hooksOpen == 0 && unbracketed == 0, "every bracket was closed");
 		L.shutdown();
 		std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
@@ -2061,6 +2399,7 @@ int main(int argc, char *argv[])
 	TestApi8();
 	TestApi9();
 	TestApi10();
+	TestApi11();
 	TestWatchdog();
 
 	Check(hookTimingBalanced && hooksOpen == 0, "the loader began and ended the timing of every hook, one at a time");

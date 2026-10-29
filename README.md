@@ -16,9 +16,9 @@ plugins talk to each other.
 
 The game knows nothing of Dado: it loads `libesdado.dylib` (macOS),
 `libesdado.so` (Linux) or `esdado.dll` (Windows) like any other loader. The
-loader speaks mod API 10 (`ES_API_VERSION`), and the mod API only grows: mods
+loader speaks mod API 11 (`ES_API_VERSION`), and the mod API only grows: mods
 built for an earlier version keep working. It also runs on a game of mod API 9:
-the API 10 calls then answer their "nothing" (-1, 0, `""` or false) and do
+the calls added since (API 10 and 11) then answer their "nothing" (-1, 0, `""` or false) and do
 nothing, and `Game.has()` says what the game offers.
 
 **Writing mods:** modders use the mod SDK (`endless-sky-mod-sdk`), which
@@ -346,7 +346,7 @@ global object, which holds:
 | Global | |
 |---|---|
 | `Mod` | the base class, the same as the SDK's `es.Mod`: every hook as a no-op, `name()`, `log(game, text)`, `every(step, seconds)`, `player_ships(game)`, and `api_version()` answering the loader's API |
-| `MOD_API` | the mod API this loader speaks (9) |
+| `MOD_API` | the mod API this loader speaks (11) |
 | `es` | `{ Mod, MOD_API }`, so `extends es.Mod` reads as it does in DadoScript |
 
 There is no `console`, no `std` or `os` module, no `setTimeout` or other
@@ -779,9 +779,33 @@ and `"mods loaded"` is how many mods they loaded (formerly `"dado mods loaded"`)
 | `timing_section(name)` | split the running hook's time into named sections for the game's timing report (mod, hook, section); `""` ends the section |
 | `energy_fraction(i) float`, `fuel_fraction(i) float` | ship i's energy and fuel as 0..1 of capacity (`energy(i)` and `fuel(i)` are absolute amounts) |
 
+**Runtime outfits and ships, moving outfits, waking ships** (API 11)
+
+| Method | |
+|---|---|
+| `define(text) int` | define outfits and ship models from data-file text: `outfit "<name>"`, `ship "<name>"` and `ship "<base>" "<name>"` nodes (outfits first, so a ship may install one the same text defines). Answers how many it defined. Refused (and logged) per node: a name the game data or a plugin defines, another mod's for this pilot, text that does not parse, a ship installing an undefined outfit, or this mod's own name with other text; the same text again counts as defined |
+| `define_outfit_variant(name, base, changes) bool` | a new outfit: a copy of `base` (data, plugin or runtime) with `changes` applied (an outfit node's children: attributes, `"display name"`, `description`, `cost`, a `weapon` block whose keys override the base weapon's). Saved as (name, base, changes) and derived again on load |
+| `define_ship_variant(name, base, changes) bool` | likewise for a ship model, loaded as the game loads `ship "<base>" "<name>"` with `changes` as its children |
+| `defined(kind, name) int` | `kind` `"outfit"` or `"ship"`: 0 unknown, 1 game data or a plugin, 2 defined at runtime for this pilot |
+| `ship_replace_outfit(ship, from, to, count) int` | on one of the player's ships (UUID) at the planet where the player is landed, replace up to `count` installed `from` with `to`, each only if the ship can take it as the outfitter checks; integrated outfits stay. Only from a hook the player started, while landed, not from the outfitter's hooks. Nothing is paid. Answers how many |
+| `outfit_take(outfit, count, from) int`, `outfit_give(outfit, count, to) int` | move outfits out of or into `"cargo"` (pooled while landed; in flight the holds of the player's unparked ships in the system, and giving goes to the flagship's hold, whatever its space) or `"storage"` (the landed planet's; landed only); `take` also knows `"any"` (cargo, then storage). Never installed outfits; maps and licenses cannot be given. In any hook with a world, not `on_save`. Answers how many |
+| `ship_distance(i) float`, `ship_x(i) float`, `ship_y(i) float` | ship i's distance from the flagship (-1 without a flagship in the system or for an unknown index) and its position |
+| `ship_reactivate(i, government, personality) bool` | wake disabled ship i (not the player's) up: crew to what it needs, hull to 10% of its maximum above its disabled level, no longer disabled. `government` (`""` keeps it) takes it and its carried ships over; `personality` (`""` keeps it) is a personality node's tokens, e.g. `"heroic staying"`. It is never a derelict again. Keeps its tag |
+
+What mods define is saved with the pilot, in a `runtime definitions` block
+before the ships, and defined again as soon as the pilot loads, so a save
+never depends on a mod having run first. A definition cannot change once made
+for a pilot: a new version needs a new name. Definitions made for another
+pilot are unknown to this one (`defined` answers 0) and may be made anew. An
+outfitter or shipyard that is open lists what is new only when it is opened
+again. `has("runtime_definitions")`, `has("outfit_transfer")` and
+`has("ship_reactivate")` say whether the game offers them.
+
 On a game of mod API 9 every one of these answers -1 (`trade_price`,
 `trade_base_price`, `outfit_stock`), 0, `""` or false, and does nothing: the
-loader checks the game's table (`es_has_<field>`) instead of failing.
+loader checks the game's table (`es_has_<field>`) instead of failing. Likewise
+on a game older than mod API 11 the API 11 calls answer 0, false or (for
+`ship_distance`) -1.
 
 ### Persistence
 
@@ -798,6 +822,9 @@ The game saves the pilot, not the mods. What lasts:
   not saved.
 * **Outfitter stock counts** set with `set_outfit_stock()` (API 10); the
   switch, `outfit_stock_on()`, is not saved.
+* **Runtime definitions** (API 11): outfits and ship models made with
+  `define()`, `define_outfit_variant()` and `define_ship_variant()`, and
+  with them the player's ships and cargo that use them.
 * **`set_data()`** text, saved with the pilot. Since API 10 a mod may keep its
   state in memory and write it in `on_save`, which runs just before every
   save, and reset it in `on_pilot_loaded`.
@@ -858,6 +885,12 @@ tests/ingame/run.sh <endless-sky executable> [<game repository>]
   - `es_loader_init`: declining an API 8 game, a short or holed host table and
     a small `EsLoader`; writing nothing past its table; exporting nothing but
     `es_loader_init`;
+  - mod API 11 through `api11_probe`: `define` (an outfit and a ship variant
+    using it, idempotence, the refusals), `defined`, both variant calls,
+    `outfit_give`/`outfit_take` in cargo and storage, landed and in flight,
+    `ship_replace_outfit` (only from a hook the player started), the ship
+    positions and `ship_reactivate`. The fake host's definitions follow the
+    game's refusal rules, not its data loading;
   - mod API 10 through `api10_probe` and `api10_pong`: trade, cargo, parking
     and removing ships, outfitter stock, `has`, timing sections, the
     fractions, `on_save` (its `set_data` lands, its post waits for the next
@@ -888,7 +921,8 @@ tests/ingame/run.sh <endless-sky executable> [<game repository>]
   - Then (`fake_host --api9-host`) the loader on a game of mod API 9: a host
     table that ends at `ship_in_stock` and an API 9 `EsLoader` reserve. The
     loader accepts it, writes nothing past the reserve, loads every mod, and
-    `api10_probe`'s API 10 calls answer -1, 0, `""` or false without failing.
+    `api10_probe`'s API 10 calls and `api11_probe`'s API 11 calls answer
+    -1, 0, `""` or false without failing.
   - Then, twice (`fake_host --watchdog`, with load/hook limits of 2000/250 ms
     and 300/1000 ms), the mods in `tests/sources-watchdog`: an endless
     `api_version`, a getter and a `Proxy` trap the hook check runs, an endless

@@ -1,0 +1,94 @@
+class Api11Probe extends es.Mod
+
+// A test mod for mod API 11: outfits and ship models defined at runtime,
+// variants, replacing outfits on the player's ships, moving outfits in and out
+// of cargo and storage, ships' positions and waking a disabled ship up. It
+// records what it saw in conditions named "test: api11 ...", which
+// tests/fake_host.cpp checks, and does nothing unless "test: api11" (or, on an
+// older game, "test: api11 old") is set.
+
+import "imports:sdk/es"
+
+string name():
+    return "api11 probe"
+
+void record(es.Game game, string key, int value):
+    game.set_condition("test: api11 " + key, value)
+
+int yes(bool value):
+    return 1 if value else 0
+
+string core():
+    return "outfit \"Shield Core\"\n\tcategory \"Systems\"\n\tmass 10\n\t\"shield generation\" 2\n"
+
+void on_enter(es.Game game, string system):
+    if game.condition("test: api11") == 0 || game.planet() == "":
+        return
+    // A ship first in the text may install an outfit defined after it.
+    record(game, "define", game.define("ship \"Star Barge\" \"Core Barge\"\n\toutfits\n\t\t\"Shield Core\"\n" + core()))
+    record(game, "define same", game.define(core()))
+    record(game, "define other text", game.define("outfit \"Shield Core\"\n\tmass 11\n"))
+    record(game, "define data name", game.define("outfit \"Laser\"\n\tmass 1\n"))
+    record(game, "define other node", game.define("fleet \"Nope\"\n"))
+    record(game, "define unknown outfit", game.define("ship \"Bad Barge\"\n\toutfits\n\t\t\"Nope\"\n"))
+    record(game, "defined", game.defined("outfit", "Shield Core") * 1000 + game.defined("ship", "Core Barge") * 100
+        + game.defined("outfit", "Laser") * 10 + game.defined("ship", "Star Barge"))
+    record(game, "defined unknown", game.defined("outfit", "Nope") + game.defined("planet", "Alpha I") + game.defined("ship", "Bad Barge"))
+    record(game, "core shields", int(game.outfit_attribute("Shield Core", "shield generation")))
+    record(game, "outfit variant", yes(game.define_outfit_variant("Laser Mk2", "Laser", "\"display name\" \"Laser Mk II\"\ncost 2500\n")))
+    record(game, "outfit variant again", yes(game.define_outfit_variant("Laser Mk2", "Laser", "\"display name\" \"Laser Mk II\"\ncost 2500\n")))
+    record(game, "outfit variant changed", yes(game.define_outfit_variant("Laser Mk2", "Laser", "cost 9\n")))
+    record(game, "variant", yes(game.outfit_name("Laser Mk2") == "Laser Mk II" && game.outfit_is_weapon("Laser Mk2"))
+        * 10000 + int(game.outfit_attribute("Laser Mk2", "cost")))
+    record(game, "variant unknown base", yes(game.define_outfit_variant("Nope Mk2", "Nope", "")))
+    record(game, "ship variant", yes(game.define_ship_variant("Barge Mk2", "Star Barge", "\"display name\" \"Barge Mk II\"\n")))
+    record(game, "ship variant name", yes(game.model_name("Barge Mk2") == "Barge Mk II" && game.model_category("Barge Mk2") == "Light Freighter"))
+    record(game, "give storage", game.outfit_give("Shield Core", 3, "storage"))
+    record(game, "take storage", game.outfit_take("Shield Core", 5, "storage"))
+    record(game, "give cargo", game.outfit_give("Battery", 4, "cargo"))
+    record(game, "take any", game.outfit_take("Battery", 1, "any"))
+    record(game, "take nowhere", game.outfit_take("Battery", 1, "elsewhere") + game.outfit_take("Battery", -3, "cargo"))
+    record(game, "give unknown", game.outfit_give("Nope", 1, "cargo"))
+    record(game, "replace in enter", game.ship_replace_outfit("uuid-b", "Battery", "Shield Core", 1))
+
+void on_planet_button(es.Game game):
+    if game.condition("test: api11 old") != 0:
+        // An older game: every API 11 call answers its "nothing".
+        record(game, "old define", game.define(core()))
+        record(game, "old variants", yes(game.define_outfit_variant("A", "Laser", "")) + yes(game.define_ship_variant("B", "Star Barge", "")))
+        record(game, "old defined", game.defined("outfit", "Laser"))
+        record(game, "old replace", game.ship_replace_outfit("uuid-b", "Battery", "Laser", 1))
+        record(game, "old move", game.outfit_give("Battery", 1, "cargo") + game.outfit_take("Battery", 1, "any"))
+        record(game, "old done", 1)
+        return
+    if game.condition("test: api11") == 0:
+        return
+    record(game, "replace", game.ship_replace_outfit("uuid-b", "Battery", "Shield Core", 5))
+    record(game, "replaced", game.ship_outfit_count("uuid-b", "Shield Core") * 10 + game.ship_outfit_count("uuid-b", "Battery"))
+    record(game, "replace none left", game.ship_replace_outfit("uuid-b", "Battery", "Shield Core", 1))
+    record(game, "replace weapon", game.ship_replace_outfit("uuid-b", "Shield Core", "Laser Mk2", 1))
+    record(game, "replace zero", game.ship_replace_outfit("uuid-b", "Shield Core", "Battery", 0))
+    record(game, "replace unknown", game.ship_replace_outfit("uuid-z", "Shield Core", "Battery", 1))
+
+void on_step(es.Game game, int step):
+    if game.condition("test: api11") == 0 || game.condition("test: api11 stepped") != 0:
+        return
+    record(game, "stepped", 1)
+    int flagship = game.flagship()
+    record(game, "distance flagship", int(game.ship_distance(flagship)))
+    record(game, "distance", int(game.ship_distance(1)))
+    record(game, "position", int(game.ship_x(1)) * 1000 + int(game.ship_y(1)))
+    record(game, "distance bad", int(game.ship_distance(99)) + int(game.ship_distance(-1)))
+    int wreck = -1
+    for i in 0 ..< game.ship_count():
+        if game.is_disabled(i) && !game.is_player(i):
+            wreck = i
+    record(game, "wreck", wreck)
+    record(game, "reactivate player", yes(game.ship_reactivate(flagship, "", "")))
+    record(game, "reactivate bad government", yes(game.ship_reactivate(wreck, "Nowhere", "")))
+    record(game, "still disabled", yes(game.is_disabled(wreck)))
+    record(game, "reactivate", yes(game.ship_reactivate(wreck, "Merchant", "heroic")))
+    record(game, "awake", yes(!game.is_disabled(wreck) && game.ship_government(wreck) == "Merchant"))
+    record(game, "reactivate again", yes(game.ship_reactivate(wreck, "", "")))
+    record(game, "flight give", game.outfit_give("Battery", 2, "cargo"))
+    record(game, "flight storage", game.outfit_give("Battery", 2, "storage") + game.outfit_take("Battery", 1, "storage"))

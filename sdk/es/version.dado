@@ -31,6 +31,12 @@
 //      (Game.has), timing sections (timing_section), energy_fraction and
 //      fuel_fraction; the hooks on_save and on_pilot_loaded; and Mod.min_api,
 //      the API a mod needs, which loaders check instead of api_version.
+//  11: outfits and ship models defined at runtime and saved with the pilot
+//      (Game.define, define_outfit_variant, define_ship_variant, defined),
+//      outfits replaced on the player's ships (ship_replace_outfit), outfits
+//      moved in and out of cargo and storage (outfit_take, outfit_give), and
+//      ships' positions and waking disabled ships up (ship_distance, ship_x,
+//      ship_y, ship_reactivate).
 package es
 
-const i64 MOD_API = 10
+const i64 MOD_API = 11

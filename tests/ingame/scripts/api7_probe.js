@@ -197,7 +197,7 @@ function Mod$class() {
       $fields() {
       }
       api_version() {
-        return 10;
+        return 11;
       }
       min_api() {
         return 1;

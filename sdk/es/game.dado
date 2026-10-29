@@ -246,3 +246,25 @@ class Game:
         fail 70
     float fuel_fraction(int i):
         fail 70
+    int define(string text):
+        fail 70
+    bool define_outfit_variant(string name, string base, string changes):
+        fail 70
+    bool define_ship_variant(string name, string base, string changes):
+        fail 70
+    int defined(string kind, string name):
+        fail 70
+    int ship_replace_outfit(string ship, string from, string to, int count):
+        fail 70
+    int outfit_take(string outfit, int count, string from):
+        fail 70
+    int outfit_give(string outfit, int count, string to):
+        fail 70
+    float ship_distance(int i):
+        fail 70
+    float ship_x(int i):
+        fail 70
+    float ship_y(int i):
+        fail 70
+    bool ship_reactivate(int i, string government, string personality):
+        fail 70

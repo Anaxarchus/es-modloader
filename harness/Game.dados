@@ -655,3 +655,111 @@ float energy_fraction(int i):
 // ship with no fuel tank).
 float fuel_fraction(int i):
     return host_ship_fuel_fraction(i)
+
+// (Mod API 11.) Define outfits and ship models while the game runs. `text` is
+// one or more top-level nodes in data-file syntax, each `outfit "<name>"`,
+// `ship "<name>"` (a whole model) or `ship "<base>" "<name>"` (the game's
+// ship-variant syntax). Outfits are defined before ships, so a ship may install
+// an outfit the same text defines; a ship may install only defined outfits.
+// What a mod defines is saved with the pilot, before its ships, and defined
+// again when the pilot loads, so a save never depends on the mod having run. A
+// definition cannot change once made for the pilot: give a new version a new
+// name. A node is refused (and logged) when the game data or a plugin defines
+// its name, another mod defined it for this pilot, it does not parse, or this
+// mod defined it already with other text; the same text again is a no-op that
+// counts. An open outfitter or shipyard lists what is new when it is opened
+// again. In any hook. Answers how many it defined (0 on an older game).
+int define(string text):
+    return host_define(text)
+
+// (Mod API 11.) Define the outfit `name` as a copy of the outfit `base` (from
+// the game data, a plugin, or defined at runtime) with `changes` applied: the
+// lines an outfit node holds, e.g. "\"shield generation\" 2.4\ncost 300000\n",
+// `"display name" "..."` (which gives it its own plural unless `plural` is
+// changed too), `description "..."` (which replaces the base's), and a `weapon`
+// block whose keys override the base weapon's (its lists, such as effects, add
+// to the base's). Without a display name it shows the base's. Saved as name,
+// base and changes, so it is derived from the base again when the pilot loads.
+// Refused as define(). In any hook. Answers true when it is defined (false on
+// an older game).
+bool define_outfit_variant(string name, string base, string changes):
+    return host_define_outfit_variant(name, base, changes)
+
+// (Mod API 11.) Define the ship model `name` as a variant of the model `base`,
+// loaded as the game loads `ship "<base>" "<name>"` with `changes` as its
+// children: what the changes leave out comes from the base, and what they give
+// replaces the base's (an `outfits` block replaces all its outfits; use `add
+// attributes` to add to its attributes). Saved and refused as
+// define_outfit_variant(). In any hook. Answers true when it is defined (false
+// on an older game).
+bool define_ship_variant(string name, string base, string changes):
+    return host_define_ship_variant(name, base, changes)
+
+// (Mod API 11.) Whether an outfit (`kind` "outfit") or a ship model ("ship") is
+// defined, by true name: 0 unknown (also for a name defined at runtime for
+// another pilot, and on an older game), 1 by the game data or a plugin, 2 at
+// runtime for this pilot (by any mod).
+int defined(string kind, string name):
+    return host_defined(kind, name)
+
+// (Mod API 11.) On one of the player's ships (UUID, as fleet_ship), landed at
+// the planet where the player is: replace up to `count` of the installed outfit
+// `from` with `to`, one at a time, each only if the ship can take it as the
+// outfitter checks (outfit, weapon, engine and cargo space, a gun port or
+// turret mount for a weapon, and every attribute with a minimum, with the old
+// one out and the new one in). Integrated outfits are not removable, and maps
+// and licenses cannot be installed. Nothing is paid or sold. Only while landed,
+// from a hook the player started (on_planet_button, on_panel, on_panel_row,
+// on_panel_header, on_confirm, on_number; not the outfitter's). Answers how
+// many were replaced (0 on an older game).
+int ship_replace_outfit(string ship, string from, string to, int count):
+    return host_ship_replace_outfit(ship, from, to, count)
+
+// (Mod API 11.) Remove up to `count` of an outfit (by true name) from the
+// player's `from`: "cargo" (the pooled cargo while landed; in flight, the holds
+// of their ships in the system that are not parked), "storage" (the planetary
+// storage where the player is landed; landed only), or "any" (cargo, then
+// storage). Never takes installed outfits. In any hook with a world (also
+// on_enter while landing, and on_step), not in on_save. Answers how many were
+// removed (0 on an older game).
+int outfit_take(string outfit, int count, string from):
+    return host_outfit_take(outfit, count, from)
+
+// (Mod API 11.) Add `count` of an outfit (by true name) to the player's `to`:
+// "cargo" (the pooled cargo while landed, else the flagship's hold, whatever
+// its free space, as missions' gifts do) or "storage" (the planetary storage
+// where the player is landed; landed only). Maps and licenses cannot be given.
+// Where outfit_take works. Answers how many were added (0 for an unknown
+// outfit, and on an older game).
+int outfit_give(string outfit, int count, string to):
+    return host_outfit_give(outfit, count, to)
+
+// (Mod API 11.) Ship i's distance from the player's flagship, in world units,
+// in this step's snapshot; -1 when the flagship is not in the system, i is out
+// of range, and on an older game.
+float ship_distance(int i):
+    return host_ship_distance(i)
+
+// (Mod API 11.) Ship i's x position in the system, in world units (0 for an
+// unknown index, and on an older game).
+float ship_x(int i):
+    return host_ship_x(i)
+
+// (Mod API 11.) Ship i's y position in the system, in world units (0 for an
+// unknown index, and on an older game).
+float ship_y(int i):
+    return host_ship_y(i)
+
+// (Mod API 11.) Bring disabled ship i, not the player's, back to life: crew up
+// to what it needs (at least 1), hull up to 10% of its maximum above the level
+// at which it is disabled (never above the maximum), shields as they are, and
+// no longer disabled, so it moves and fires again. `government` ("" keeps its
+// own) takes it and its carried ships over; `personality` ("" keeps its own) is
+// the tokens of a personality node, e.g. "heroic staying", and replaces its
+// personality. A ship that wakes up is never a derelict again: the AI flies it
+// as any other ship. Its tag stays. In flight, in any hook with ships. Answers
+// true when it woke; false for an unknown index or government, a personality
+// that does not parse, the player's ship, a ship that is not disabled or is
+// destroyed, and on an older game.
+bool ship_reactivate(int i, string government, string personality):
+    return host_ship_reactivate(i, government, personality)

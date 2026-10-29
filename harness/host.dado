@@ -135,10 +135,23 @@ foreign "es_host.h":
     void es_timing_section(cstring name)
     f64 es_ship_energy_fraction(i32 i)
     f64 es_ship_fuel_fraction(i32 i)
+    // Mod API 11. Optional, as API 10's.
+    i32 es_define(cstring text)
+    i32 es_define_outfit_variant(cstring name, cstring base, cstring changes)
+    i32 es_define_ship_variant(cstring name, cstring base, cstring changes)
+    i32 es_defined(cstring kind, cstring name)
+    i32 es_ship_replace_outfit(cstring ship, cstring from, cstring to, i32 count)
+    i32 es_outfit_take(cstring outfit, i32 count, cstring from)
+    i32 es_outfit_give(cstring outfit, i32 count, cstring to)
+    f64 es_ship_distance(i32 i)
+    f64 es_ship_x(i32 i)
+    f64 es_ship_y(i32 i)
+    i32 es_ship_reactivate(i32 i, cstring government, cstring personality)
     i32 es_has_trade_price()
     i32 es_has_trade_base_price()
     i32 es_has_outfit_stock()
     i32 es_has_api_has()
+    i32 es_has_ship_distance()
 
 // A ship index the game can take: inside i32, and in this step's snapshot.
 private bool valid_ship(i64 i):
@@ -808,3 +821,97 @@ f64 host_ship_energy_fraction(i64 i):
 
 f64 host_ship_fuel_fraction(i64 i):
     return es_ship_fuel_fraction(i32(i)) if valid_ship(i) else 0.0
+
+// ---- Mod API 11 ----
+// On an older game these calls are missing: the shim answers 0 or "" and does
+// nothing; ship_distance, whose "unknown" is -1, checks first.
+
+// A count the game can take: below 1 is nothing to do, beyond i32 is clamped.
+private i32 count_i32(i64 count):
+    if count < 1:
+        return 0
+    if count > 2147483647:
+        return 2147483647
+    return i32(count)
+
+i64 host_define(string8 text):
+    ref []char8 t = strings.clone_to_cstring(text)
+    defer #delete(t)
+    return es_define(cstring(rawptr(&t[0])))
+
+bool host_define_outfit_variant(string8 name, string8 base, string8 changes):
+    ref []char8 n = strings.clone_to_cstring(name)
+    defer #delete(n)
+    ref []char8 b = strings.clone_to_cstring(base)
+    defer #delete(b)
+    ref []char8 c = strings.clone_to_cstring(changes)
+    defer #delete(c)
+    return es_define_outfit_variant(cstring(rawptr(&n[0])), cstring(rawptr(&b[0])), cstring(rawptr(&c[0]))) != 0
+
+bool host_define_ship_variant(string8 name, string8 base, string8 changes):
+    ref []char8 n = strings.clone_to_cstring(name)
+    defer #delete(n)
+    ref []char8 b = strings.clone_to_cstring(base)
+    defer #delete(b)
+    ref []char8 c = strings.clone_to_cstring(changes)
+    defer #delete(c)
+    return es_define_ship_variant(cstring(rawptr(&n[0])), cstring(rawptr(&b[0])), cstring(rawptr(&c[0]))) != 0
+
+i64 host_defined(string8 kind, string8 name):
+    ref []char8 k = strings.clone_to_cstring(kind)
+    defer #delete(k)
+    ref []char8 n = strings.clone_to_cstring(name)
+    defer #delete(n)
+    return es_defined(cstring(rawptr(&k[0])), cstring(rawptr(&n[0])))
+
+i64 host_ship_replace_outfit(string8 ship, string8 from, string8 to, i64 count):
+    i32 n = count_i32(count)
+    if n == 0:
+        return 0
+    ref []char8 s = strings.clone_to_cstring(ship)
+    defer #delete(s)
+    ref []char8 f = strings.clone_to_cstring(from)
+    defer #delete(f)
+    ref []char8 t = strings.clone_to_cstring(to)
+    defer #delete(t)
+    return es_ship_replace_outfit(cstring(rawptr(&s[0])), cstring(rawptr(&f[0])), cstring(rawptr(&t[0])), n)
+
+i64 host_outfit_take(string8 outfit, i64 count, string8 from):
+    i32 n = count_i32(count)
+    if n == 0:
+        return 0
+    ref []char8 o = strings.clone_to_cstring(outfit)
+    defer #delete(o)
+    ref []char8 f = strings.clone_to_cstring(from)
+    defer #delete(f)
+    return es_outfit_take(cstring(rawptr(&o[0])), n, cstring(rawptr(&f[0])))
+
+i64 host_outfit_give(string8 outfit, i64 count, string8 to):
+    i32 n = count_i32(count)
+    if n == 0:
+        return 0
+    ref []char8 o = strings.clone_to_cstring(outfit)
+    defer #delete(o)
+    ref []char8 t = strings.clone_to_cstring(to)
+    defer #delete(t)
+    return es_outfit_give(cstring(rawptr(&o[0])), n, cstring(rawptr(&t[0])))
+
+f64 host_ship_distance(i64 i):
+    if es_has_ship_distance() == 0 || !valid_ship(i):
+        return -1.0
+    return es_ship_distance(i32(i))
+
+f64 host_ship_x(i64 i):
+    return es_ship_x(i32(i)) if valid_ship(i) else 0.0
+
+f64 host_ship_y(i64 i):
+    return es_ship_y(i32(i)) if valid_ship(i) else 0.0
+
+bool host_ship_reactivate(i64 i, string8 government, string8 personality):
+    if !valid_ship(i):
+        return false
+    ref []char8 g = strings.clone_to_cstring(government)
+    defer #delete(g)
+    ref []char8 p = strings.clone_to_cstring(personality)
+    defer #delete(p)
+    return es_ship_reactivate(i32(i), cstring(rawptr(&g[0])), cstring(rawptr(&p[0]))) != 0
