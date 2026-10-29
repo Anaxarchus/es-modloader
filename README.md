@@ -868,6 +868,7 @@ ctest --test-dir build                  # = tools/dado-mods.sh test, plus the he
 tools/dado-mods.sh test                 # ESDADO_LIB=<library> to test another build
 tools/dado-mods.sh examples             # rebuild the examples and the in-game test's scripts
 tests/ingame/run.sh <endless-sky executable> [<game repository>]
+tests/ingame/api11/run.sh <endless-sky executable> [<game repository>]
 ```
 
 * **`test`** builds `tests/fake_host.cpp`, a stand-in game: it fills an
@@ -941,6 +942,24 @@ tests/ingame/run.sh <endless-sky executable> [<game repository>]
   under `xvfb-run` on a headless Linux. A test mod halves the flagship's hull,
   and the test asserts that a loader is installed, that the mods loaded and
   that the example repairs the hull.
+
+* **Mod API 11 end to end** (`tests/ingame/api11/run.sh`): a DadoScript mod,
+  `tests/ingame/api11/api11_e2e` (a plugin's sources: `plugin.txt`, `data/`
+  with the integration test "Dado API 11", `src/api11_e2e.dados`), built with
+  the mod SDK (`$ES_SDK`, default `../endless-sky-mod-sdk`: `npm run build`),
+  run in the real game with this loader in a scratch config's `modloaders`.
+  The test loads a plain pilot on Ruin; the mod's `on_pilot_loaded` defines
+  an outfit, a whole ship model and ship variants (`define`, both variant
+  calls), checks `defined`, the refusals and idempotence, and moves outfits
+  in and out of cargo and storage; its planet button (key `k`) replaces two
+  installed outfits with runtime ones (`ship_replace_outfit`) and buys a ship
+  of the runtime model; in flight it spawns a derelict fleet with
+  `arrive=false`, checks `ship_distance`/`ship_x`/`ship_y`, wakes the derelict
+  with `ship_reactivate` and checks that it then moves. The test asserts the
+  mod's pass/fail conditions and the game's own outfit and ship conditions,
+  takes off (which saves), loads that save and asserts it all again. The
+  script then checks that the save's `runtime definitions` come before its
+  ships and that a game without the loader parses it with no errors.
 
 ## Changing the API
 

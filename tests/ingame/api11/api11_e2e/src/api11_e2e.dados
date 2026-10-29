@@ -1,0 +1,212 @@
+class Api11E2e extends es.Mod
+
+// Mod API 11 end to end, in the real game, through the Dado loader: built with
+// the mod SDK and run by tests/ingame/api11/run.sh on the integration test
+// "Dado API 11" (data/api11 e2e tests.txt). Every check that passes adds 1 to
+// the condition "api11e pass"; one that fails adds 1 to "api11e fail" and logs
+// "API11E FAIL: <what>". The test asserts those and the conditions each stage
+// sets when it is done:
+//   on_pilot_loaded   define, the variants, defined, and moving outfits in
+//                     and out of cargo and storage while landed
+//                     ("api11e loads": how many times the test's pilot loaded);
+//   on_planet_button  ship_replace_outfit (a hook the player started), and
+//                     buying a ship of a runtime model ("api11e replaced");
+//   on_enter, on_step in flight: moving outfits, the ship queries, and waking
+//                     a derelict spawned with arrive=false, which must then
+//                     move and stay awake ("api11e woke").
+
+import "imports:sdk/es"
+
+// The flight stage: steps since takeoff, and the derelict's state (0 asleep,
+// 1 woken, 2 checked) with where it woke.
+int flight_steps = 0
+int woke = 0
+int woke_step = 0
+float woke_x = 0.0
+float woke_y = 0.0
+bool spawned = false
+
+string name():
+    return "api11 e2e"
+
+int min_api():
+    return 11
+
+void check(es.Game game, bool ok, string what):
+    if ok:
+        game.set_condition("api11e pass", game.condition("api11e pass") + 1)
+    else:
+        game.set_condition("api11e fail", game.condition("api11e fail") + 1)
+        game.log("API11E FAIL: " + what)
+
+// A runtime outfit, and a variant of a game ship that installs it, in one text
+// (the ship comes first: the game defines a text's outfits before its ships).
+string core():
+    return "outfit \"API11E Core\"\n\tcategory \"Systems\"\n\tcost 1000\n\tmass 10\n\t\"outfit space\" -10\n\t\"shield generation\" 2\n"
+
+string barge():
+    return "ship \"Star Barge\" \"API11E Barge\"\n\t\"display name\" \"API11E Barge\"\n"
+
+// A whole runtime model (a variant's true model name is its base's, so the
+// game's "ship model" conditions see only a whole model), installing the
+// runtime outfit.
+string hull():
+    return ("ship \"API11E Hull\"\n\tsprite \"ship/star barge\"\n\tthumbnail \"thumbnail/star barge\"\n\tattributes\n"
+        + "\t\tcategory \"Light Freighter\"\n\t\tcost 190000\n\t\tmass 70\n\t\tbunks 3\n\t\t\"cargo space\" 50\n\t\tdrag 2.1\n"
+        + "\t\t\"engine capacity\" 40\n\t\t\"fuel capacity\" 300\n\t\t\"heat dissipation\" 0.8\n\t\thull 1000\n"
+        + "\t\t\"outfit space\" 130\n\t\t\"required crew\" 1\n\t\tshields 600\n\t\t\"weapon capacity\" 20\n\t\tthrust 25\n"
+        + "\t\tturn 250\n\t\t\"energy generation\" 10\n\toutfits\n\t\tHyperdrive\n\t\t\"API11E Core\"\n"
+        + "\tengine -9 38 1\n\tengine 9 38 1\n")
+
+// The test's pilot is landed on Ruin; the game may start the mods with a
+// pilot of its own first.
+bool test_pilot(es.Game game):
+    return game.fleet_count() > 0 && game.planet() == "Ruin"
+
+void on_load(es.Game game):
+    game.planet_button("API 11")
+
+void on_pilot_loaded(es.Game game):
+    game.planet_button("API 11")
+    flight_steps = 0
+    woke = 0
+    spawned = false
+    if !test_pilot(game):
+        return
+    int loads = game.condition("api11e loads") + 1
+    check(game, game.has("runtime_definitions") && game.has("outfit_transfer") && game.has("ship_reactivate")
+        && game.has("call:define"), "has() names the API 11 features")
+
+    // What the save brought back, before any call (from the second load on).
+    if loads >= 2:
+        check(game, game.defined("outfit", "API11E Core") == 2, "round trip: runtime outfit")
+        check(game, game.defined("ship", "API11E Barge") == 2, "round trip: runtime ship variant")
+        check(game, game.defined("outfit", "API11E Battery") == 2, "round trip: outfit variant")
+        check(game, game.defined("outfit", "API11E Laser") == 2, "round trip: weapon variant")
+        check(game, game.defined("ship", "API11E Barge Mk2") == 2, "round trip: ship variant")
+        check(game, game.defined("ship", "API11E Hull") == 2, "round trip: runtime ship model")
+        check(game, game.fleet_ship_model(game.fleet_ship(1)) == "API11E Hull", "round trip: the ship bought of it")
+        check(game, game.ship_outfit_count(game.fleet_ship(1), "API11E Core") == 1, "round trip: its runtime outfit")
+        check(game, game.outfit_attribute("API11E Battery", "energy capacity") == 12345.0, "round trip: the variant's change")
+
+    // define: an outfit and a ship using it; the same text again is a no-op
+    // that counts, every load; other text, a data name, another node and a
+    // ship with an unknown outfit are refused.
+    check(game, game.define(hull() + barge() + core()) == 3, "define an outfit, and a ship model and a ship variant using it")
+    check(game, game.define(core()) == 1, "the same text again counts")
+    check(game, game.define("outfit \"API11E Core\"\n\t\"shield generation\" 3\n") == 0, "other text is refused")
+    check(game, game.define("outfit \"Hyperdrive\"\n\tmass 1\n") == 0, "a game data name is refused")
+    check(game, game.define("fleet \"API11E Fleet\"\n") == 0, "another node is refused")
+    check(game, game.define("ship \"API11E Bad\"\n\toutfits\n\t\t\"API11E No Such Thing\"\n") == 0, "a ship with an undefined outfit is refused")
+    check(game, game.outfit_attribute("API11E Core", "shield generation") == 2.0, "the runtime outfit's attribute")
+    check(game, game.model_name("API11E Barge") == "API11E Barge" && game.model_category("API11E Barge") == "Light Freighter",
+        "the runtime ship variant derives from its base")
+
+    // Variants.
+    check(game, game.define_outfit_variant("API11E Battery", "LP036a Battery Pack",
+        "\"energy capacity\" 12345\n\"display name\" \"API11E Battery\"\n"), "outfit variant of a game outfit")
+    check(game, game.outfit_attribute("API11E Battery", "energy capacity") == 12345.0, "the variant's change")
+    check(game, game.outfit_attribute("API11E Battery", "mass") == game.outfit_attribute("LP036a Battery Pack", "mass"), "the variant keeps the rest")
+    check(game, game.outfit_name("API11E Battery") == "API11E Battery", "the variant's display name")
+    check(game, game.define_outfit_variant("API11E Laser", "Heavy Laser", "\"display name\" \"API11E Laser\"\nweapon\n\t\"shield damage\" 100\n"),
+        "weapon variant")
+    check(game, game.outfit_is_weapon("API11E Laser"), "the weapon variant is a weapon")
+    check(game, !game.define_outfit_variant("API11E Nothing", "API11E No Such Thing", "mass 1\n"), "a variant of an unknown outfit is refused")
+    check(game, game.define_ship_variant("API11E Barge Mk2", "Star Barge", "\"display name\" \"API11E Barge Mk2\"\n"), "ship variant of a game ship")
+    check(game, game.model_name("API11E Barge Mk2") == "API11E Barge Mk2", "the ship variant's display name")
+    check(game, game.model_cost("API11E Barge Mk2") == game.model_cost("Star Barge"), "the ship variant's cost")
+
+    // defined.
+    check(game, game.defined("outfit", "API11E Core") == 2 && game.defined("ship", "API11E Barge") == 2, "defined: runtime")
+    check(game, game.defined("outfit", "Hyperdrive") == 1 && game.defined("ship", "Star Barge") == 1, "defined: game data")
+    check(game, game.defined("outfit", "API11E No Such Thing") == 0 && game.defined("planet", "Ruin") == 0, "defined: unknown")
+
+    // Moving outfits while landed, on the first load only (the save keeps the
+    // result: 2 API11E Battery in cargo and 1 API11E Core in storage).
+    if loads == 1:
+        check(game, game.outfit_give("API11E Core", 3, "storage") == 3, "give to storage")
+        check(game, game.outfit_take("API11E Core", 2, "storage") == 2, "take from storage")
+        check(game, game.outfit_give("API11E Battery", 3, "cargo") == 3, "give to cargo")
+        check(game, game.outfit_take("API11E Battery", 1, "any") == 1, "take from any")
+        check(game, game.outfit_take("API11E Battery", 1, "elsewhere") == 0, "an unknown place")
+        check(game, game.outfit_give("API11E No Such Thing", 1, "cargo") == 0, "an unknown outfit")
+    // Only a hook the player started may replace outfits.
+    check(game, game.ship_replace_outfit(game.fleet_ship(0), "LP036a Battery Pack", "API11E Battery", 1) == 0,
+        "replace refused outside a hook the player started")
+    game.set_condition("api11e loads", loads)
+
+void on_planet_button(es.Game game):
+    if !test_pilot(game):
+        return
+    string ship = game.fleet_ship(0)
+    check(game, game.ship_outfit_count(ship, "LP036a Battery Pack") == 1, "the flagship has its battery")
+    check(game, game.ship_replace_outfit(ship, "LP036a Battery Pack", "API11E Battery", 5) == 1, "replace the one battery")
+    check(game, game.ship_outfit_count(ship, "LP036a Battery Pack") == 0 && game.ship_outfit_count(ship, "API11E Battery") == 1,
+        "the variant is installed in its place")
+    check(game, game.ship_replace_outfit(ship, "D14-RN Shield Generator", "API11E Core", 1) == 1, "replace with a runtime outfit")
+    check(game, game.ship_replace_outfit(ship, "API11E Core", "API11E Laser", 1) == 0, "a gun needs a gun port: refused")
+    check(game, game.ship_replace_outfit(ship, "LP036a Battery Pack", "API11E Battery", 1) == 0, "nothing left to replace")
+    // A ship of a runtime model, bought here, to see it saved and loaded.
+    check(game, game.buy_ship("API11E Hull", "Hull"), "buy a ship of a runtime model")
+    check(game, game.fleet_ship_model(game.fleet_ship(1)) == "API11E Hull", "the bought ship's model")
+    game.set_condition("api11e replaced", 1)
+
+// The spawned derelict: the disabled ship with this mod's tag, or once woken,
+// the one the Merchants now own.
+int find_wreck(es.Game game):
+    for i in 0 ..< game.ship_count():
+        if game.ship_tag(i) == "api11e":
+            if woke == 0 && game.is_disabled(i):
+                return i
+            if woke > 0 && game.ship_government(i) == "Merchant":
+                return i
+    return -1
+
+void on_enter(es.Game game, string system):
+    if game.planet() != "" || spawned || woke > 0 || game.condition("api11e loads") == 0:
+        return
+    spawned = true
+    check(game, game.spawn("API11E drifters", "Pirate", "api11e", false) >= 1, "spawn a derelict, already there")
+
+float squared(float x):
+    return x * x
+
+void on_step(es.Game game, int step):
+    if game.condition("api11e loads") == 0 || woke == 2:
+        return
+    flight_steps = flight_steps + 1
+    int flagship = game.flagship()
+    if flight_steps == 1 && flagship >= 0:
+        check(game, game.ship_distance(flagship) == 0.0, "the flagship's own distance")
+        check(game, game.ship_distance(-1) == -1.0 && game.ship_distance(game.ship_count()) == -1.0, "distance of no ship")
+        check(game, !game.ship_reactivate(flagship, "", ""), "the player's ship is not reactivated")
+        check(game, game.outfit_give("API11E Core", 2, "cargo") == 2, "give into the flagship's hold")
+        check(game, game.outfit_take("API11E Core", 3, "cargo") == 2, "take from the ships' holds")
+        check(game, game.outfit_take("API11E Core", 1, "storage") == 0, "no storage in flight")
+    int i = find_wreck(game)
+    if woke == 0 && i >= 0 && flight_steps > 10:
+        float dx = game.ship_x(i) - game.ship_x(flagship)
+        float dy = game.ship_y(i) - game.ship_y(flagship)
+        float d = game.ship_distance(i)
+        float error = squared(dx) + squared(dy) - squared(d)
+        check(game, d > 0.0 && error < 0.001 * (1.0 + squared(d)) && error > -0.001 * (1.0 + squared(d)), "distance matches positions")
+        check(game, game.is_disabled(i), "the derelict is disabled")
+        check(game, !game.ship_reactivate(i, "No Such Government", ""), "an unknown government is refused")
+        check(game, game.is_disabled(i), "a refused call changes nothing")
+        check(game, game.ship_reactivate(i, "Merchant", "heroic"), "reactivate")
+        check(game, !game.is_disabled(i), "no longer disabled")
+        check(game, game.ship_government(i) == "Merchant", "the government changed")
+        check(game, game.ship_tag(i) == "api11e", "it keeps its tag")
+        check(game, !game.ship_reactivate(i, "", ""), "an active ship is not reactivated")
+        woke = 1
+        woke_step = flight_steps
+        woke_x = game.ship_x(i)
+        woke_y = game.ship_y(i)
+    else if woke == 1 && flight_steps == woke_step + 90:
+        check(game, i >= 0, "the woken ship is still here, and still the Merchants'")
+        if i >= 0:
+            float moved = squared(game.ship_x(i) - woke_x) + squared(game.ship_y(i) - woke_y)
+            check(game, moved > 2500.0, "the woken ship moves (" + string(int(moved)) + " squared units)")
+            check(game, !game.is_disabled(i), "it stays awake")
+        woke = 2
+        game.set_condition("api11e woke", 1)

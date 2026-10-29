@@ -33,6 +33,14 @@ test in `tests/modloader/api11`); README.md has the mod side.
   (whose host keeps runtime definitions with the game's refusal rules,
   cargo/storage outfits, ship positions and reactivation), and the probe's
   "old game" path under `--api9-host`.
+* **End to end in the real game** (`tests/ingame/api11/run.sh`, README.md,
+  Tests): a DadoScript mod built with the SDK exercises every API 11 call in
+  Argosy's `api11` build and the save round trip. Passed on 2026-10-28 (Linux
+  x86_64, xvfb), with `tests/ingame/run.sh` and the game's own
+  `tests/modloader/api11/run.sh` also passing. Found on the way: a ship
+  *variant*'s true model name is its base's (stock Endless Sky), so the game's
+  `ship model (all): <variant>` condition never counts a runtime variant; the
+  test buys a ship of a whole runtime model (`ship "API11E Hull"`) instead.
 
 ## Mod API 10 (2026-10-28): loader 0.2.0
 

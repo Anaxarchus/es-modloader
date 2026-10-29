@@ -1,0 +1,5 @@
+name "Dado API 11 test"
+version "1"
+authors
+	"Anaxarchus"
+about "The Dado loader's end-to-end test of mod API 11: a DadoScript mod (scripts/api11_e2e.js, built with the mod SDK) and the integration test \"Dado API 11\". Installed by tests/ingame/api11/run.sh in es-modloader."

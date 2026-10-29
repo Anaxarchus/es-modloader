@@ -1,0 +1,159 @@
+# Copyright (c) 2026 by Anaxarchus
+#
+# Endless Sky is free software: you can redistribute it and/or modify it under the
+# terms of the GNU General Public License as published by the Free Software
+# Foundation, either version 3 of the License, or (at your option) any later version.
+#
+# Endless Sky is distributed in the hope that it will be useful, but WITHOUT ANY
+# WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS FOR A
+# PARTICULAR PURPOSE. See the GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License along with
+# this program. If not, see <https://www.gnu.org/licenses/>.
+
+# Mod API 11 end to end with the Dado loader, run by tests/ingame/api11/run.sh
+# in es-modloader: that script builds this plugin with the mod SDK (the mod is
+# src/api11_e2e.dados), installs it and the loader in a scratch copy of the
+# game's integration-test config, and runs the game on "Dado API 11".
+
+# A plain pilot on Ruin, with a Star Barge: everything runtime comes from the mod.
+test-data "API11E Save"
+	category "savegame"
+	contents
+		pilot Dado Eleven
+		date 16 11 3013
+		system "Terra Incognita"
+		planet Ruin
+		clearance
+		"reputation with"
+			Pirate 1
+			Merchant 1
+		ship "Star Barge"
+			name "Eleven"
+			sprite "ship/star barge"
+			attributes
+				category "Light Freighter"
+				cost 190000
+				mass 70
+				bunks 3
+				"cargo space" 50
+				drag 2.1
+				"engine capacity" 400
+				"fuel capacity" 300
+				"heat dissipation" 0.8
+				hull 1000
+				"outfit space" 1300
+				"required crew" 1
+				shields 600
+				"turret mounts" 1
+				"weapon capacity" 200
+			outfits
+				"X1700 Ion Thruster"
+				"X1200 Ion Steering"
+				Hyperdrive
+				"Anti-Missile Turret"
+				"D14-RN Shield Generator"
+				"nGVF-BB Fuel Cell"
+				"LP036a Battery Pack"
+			crew 1
+			fuel 300
+			shields 600
+			hull 1000
+			position 0 0
+			engine -9 38 1
+			engine 9 38 1
+			turret 0 -8 "Anti-Missile Turret"
+			system "Terra Incognita"
+			planet Ruin
+		account
+			credits 100000000
+			score 400
+			history
+		visited "Terra Incognita"
+		"visited planet" Ruin
+		conditions
+			"Ruin: Landing: offered"
+
+
+# A derelict that can fly once it wakes up; the mod spawns its fleet in flight.
+ship "API11E Drifter"
+	sprite "ship/star barge"
+	attributes
+		category "Light Freighter"
+		cost 1000
+		mass 50
+		bunks 2
+		drag 2
+		hull 2000
+		shields 500
+		"required crew" 1
+		thrust 40
+		turn 300
+		"energy generation" 10
+		"energy capacity" 100
+		"fuel capacity" 300
+	engine -9 38 1
+	engine 9 38 1
+
+fleet "API11E drifters"
+	personality derelict
+	government "Pirate"
+	variant
+		"API11E Drifter"
+
+
+test "Dado API 11"
+	status active
+	description "Mod API 11 through the Dado loader: a DadoScript mod defines outfits and ships, moves and replaces outfits, and wakes a derelict up; the definitions and what uses them survive saving and loading."
+	sequence
+		inject "API11E Save"
+		call "Load First Savegame"
+		# on_pilot_loaded defined everything and moved outfits.
+		assert
+			"mod loaders" >= 1
+			"mods loaded" >= 1
+			"api11e loads" == 1
+			"api11e fail" == 0
+			"api11e pass" == 29
+			"outfit (cargo): API11E Battery" == 2
+			"outfit (storage): API11E Core" == 1
+			"outfit (flagship installed): LP036a Battery Pack" == 1
+		# The mod's planet button: replace outfits, buy a ship of a runtime model.
+		input
+			key k
+		assert
+			"api11e replaced" == 1
+			"api11e fail" == 0
+			"outfit (flagship installed): LP036a Battery Pack" == 0
+			"outfit (flagship installed): API11E Battery" == 1
+			"outfit (flagship installed): D14-RN Shield Generator" == 0
+			"outfit (flagship installed): API11E Core" == 1
+			"ship model (all): API11E Hull" == 1
+		# Taking off saves the pilot; in flight the mod wakes its derelict.
+		call "Depart"
+		assert
+			"flagship attribute: energy capacity" >= 12345000
+			"flagship attribute: shield generation" == 2000
+		label "waiting"
+		branch "waiting"
+			not "api11e woke"
+		assert
+			"api11e fail" == 0
+		# Load what taking off saved: the definitions come back before the ships.
+		input
+			key escape
+		call "Load First Savegame"
+		assert
+			"api11e loads" == 2
+			"api11e fail" == 0
+			"ship model (all): API11E Hull" == 1
+			"outfit (flagship installed): API11E Battery" == 1
+			"outfit (flagship installed): API11E Core" == 1
+			"outfit (flagship installed): LP036a Battery Pack" == 0
+			"outfit (cargo): API11E Battery" == 2
+			"outfit (storage): API11E Core" == 1
+		call "Depart"
+		assert
+			"flagship attribute: energy capacity" >= 12345000
+			"flagship attribute: shield generation" == 2000
+			"api11e fail" == 0
